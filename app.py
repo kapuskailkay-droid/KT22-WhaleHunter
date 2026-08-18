@@ -17,8 +17,9 @@ st.set_page_config(
     page_title='MEXC VIP Algoritmik & TOTAL3 Sinyal Radarı', layout='wide'
 )
 
-if 'gonderilen_sinyaller' not in st.session_state:
-  st.session_state.gonderilen_sinyaller = set()
+# Sinyal tekrar & skor hafızası
+if 'sinyal_skorlari' not in st.session_state:
+  st.session_state.sinyal_skorlari = {}
 
 # --- YAN PANEL: TELEGRAM AYARLARI ---
 st.sidebar.header('📱 Telegram Bildirim Ayarları')
@@ -86,10 +87,10 @@ coin_adedi = st.sidebar.select_slider(
     value=100,
 )
 
-st.title(f'⚡ MEXC {piyasa_turu} VIP Algoritmik & TOTAL3 Ayrışma Radarı')
+st.title(f'⚡ MEXC {piyasa_turu} VIP Algoritmik Sinyal & Skor Radarı')
 
 
-# --- CANLI TOTAL3 ÇEKİCİ (COINGECKO API) ---
+# --- CANLI TOTAL3 ÇEKİCİ ---
 @st.cache_data(ttl=60)
 def fetch_total3_data():
   try:
@@ -103,10 +104,8 @@ def fetch_total3_data():
     btc_pct = market_cap_percentage.get('btc', 0)
     eth_pct = market_cap_percentage.get('eth', 0)
 
-    # TOTAL3 = Total - (BTC + ETH)
     total3_val = total_market_cap * (1 - (btc_pct + eth_pct) / 100)
     total3_billions = round(total3_val / 1e9, 2)
-
     total_cap_change_24h = data.get(
         'market_cap_change_percentage_24h_usd', 0.0
     )
@@ -295,7 +294,7 @@ def piyasa_tara():
         hacim_orani = son_hacim / gecmis_hacim if gecmis_hacim > 0 else 0
         mum_degisimi = ((son_kapanis - son_acilis) / son_acilis) * 100
 
-        # 24s Değişim (Coin Ticker)
+        # 24s Değişim
         coin_24h_change = (
             float(t_info.get('percentage', 0) or 0)
             if 'percentage' in t_info
@@ -310,8 +309,7 @@ def piyasa_tara():
         sinyal_adi = None
         aksiyon = None
 
-        # 1. 🔥 TOTAL3 GÖRECELİ GÜÇ (RELATIVE STRENGTH / WEAKNESS)
-        # TOTAL3 düşerken coin güçlü kalıp hacimle yükseliyorsa
+        # 1. 🔥 TOTAL3 AYRIŞMASI
         if (
             total3_change <= -0.5
             and coin_24h_change >= 1.5
@@ -322,7 +320,6 @@ def piyasa_tara():
           )
           aksiyon = '🟢 GÜÇLÜ LONG'
 
-        # TOTAL3 yükselirken coin zayıf kalıp düşüyorsa
         elif (
             total3_change >= 0.8
             and coin_24h_change <= -1.2
@@ -420,13 +417,32 @@ def piyasa_tara():
           yon_turu = 'LONG' if 'LONG' in aksiyon else 'SHORT'
           tp1, tp2, sl = hesapla_tp_sl(son_kapanis, atr, yon=yon_turu)
 
-          sinyal_id = f'{temiz_parite}_{sinyal_adi}_{zaman_dilimi}'
+          sinyal_anahtari = f'{temiz_parite}_{sinyal_adi}_{zaman_dilimi}'
+
+          # --- SKOR VE TEKRAR SAYACI HESAPLAMA ---
+          if sinyal_anahtari in st.session_state.sinyal_skorlari:
+            st.session_state.sinyal_skorlari[sinyal_anahtari]['count'] += 1
+          else:
+            st.session_state.sinyal_skorlari[sinyal_anahtari] = {
+                'count': 1,
+                'first_time': pd.Timestamp.now().strftime('%H:%M'),
+            }
+
+          skor = st.session_state.sinyal_skorlari[sinyal_anahtari]['count']
+
+          # Skor Metni Formatı
+          if skor == 1:
+            skor_metni = '1x (İlk Tespit 🎯)'
+            skor_tablo = '⭐ 1x'
+          elif skor == 2:
+            skor_metni = '2x (2. Kez Teyit Edildi ⚡)'
+            skor_tablo = '⭐⭐ 2x'
+          elif skor >= 3:
+            skor_metni = f'{skor}x ({skor}. Kez Güçlü Teyit 🔥)'
+            skor_tablo = f'🔥🔥 {skor}x'
 
           # Telegram Gönderimi
-          if (
-              telegram_aktif
-              and sinyal_id not in st.session_state.gonderilen_sinyaller
-          ):
+          if telegram_aktif:
             fonlama_bilgi = (
                 f'\n💸 <b>Fonlama:</b> %{round(funding_rate, 4)}'
                 if funding_rate is not None
@@ -437,6 +453,7 @@ def piyasa_tara():
                 f'📌 <b>Parite:</b> {temiz_parite}\n'
                 f'🎯 <b>Yön:</b> {aksiyon}\n'
                 f'⚡ <b>Strateji:</b> {sinyal_adi}\n'
+                f'🏆 <b>Sinyal Skoru:</b> {skor_metni}\n'
                 f'🌐 <b>TOTAL3 (24s):</b> %{total3_change}\n'
                 f'⏱ <b>Zaman:</b> {zaman_dilimi}\n'
                 f'💰 <b>Giriş:</b> {son_kapanis} $\n'
@@ -454,9 +471,8 @@ def piyasa_tara():
             except Exception:
               pass
 
-            st.session_state.gonderilen_sinyaller.add(sinyal_id)
-
           sinyaller.append({
+              'Skor (Teyit)': skor_tablo,
               'Yön': aksiyon,
               'Sinyal Detayı': sinyal_adi,
               'Sembol': temiz_parite,
@@ -477,9 +493,7 @@ def piyasa_tara():
 manuel_tara = st.button('🔍 Şimdi Tara', type='primary', use_container_width=True)
 
 if oto_yenileme or manuel_tara:
-  with st.spinner(
-      'TOTAL3 verileri ve MEXC pariteleri taranıyor, Telegram\'a aktarılıyor...'
-  ):
+  with st.spinner('Piyasa taranıyor, skorlar hesaplanıyor...'):
     df_sonuc = piyasa_tara()
 
   if not df_sonuc.empty:
