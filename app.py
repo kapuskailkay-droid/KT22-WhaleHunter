@@ -31,27 +31,11 @@ chat_id = st.sidebar.text_input('Telegram Chat ID', value='-1004434260285')
 
 col_t1, col_t2 = st.sidebar.columns(2)
 with col_t1:
-  liq_thread_id = st.text_input(
-      '💥 Likidasyon Sekme ID',
-      value='73',
-      help='Likidasyon sinyallerinin gideceği Topic ID',
-  )
-  long_thread_id = st.text_input(
-      '🟢 Long / Pump Sekme ID',
-      value='73',
-      help='Long sinyallerinin gideceği Topic ID',
-  )
+  liq_thread_id = st.text_input('💥 Likidasyon Sekme ID', value='363')
+  long_thread_id = st.text_input('🟢 Long / Pump Sekme ID', value='362')
 with col_t2:
-  short_thread_id = st.text_input(
-      '🔴 Short Sekme ID',
-      value='73',
-      help='Short sinyallerinin gideceği Topic ID',
-  )
-  div_thread_id = st.text_input(
-      '📈 Uyumsuzluk (Div) ID',
-      value='73',
-      help='RSI Divergence sinyallerinin gideceği Topic ID',
-  )
+  short_thread_id = st.text_input('🔴 Short Sekme ID', value='360')
+  div_thread_id = st.text_input('📈 Uyumsuzluk (Div) ID', value='364')
 
 st.sidebar.markdown('---')
 st.sidebar.header('⚙️ Canlı Yayın & Tarama')
@@ -69,7 +53,7 @@ if oto_yenileme:
   st.sidebar.success(f'🟢 Canlı mod aktif: Her {yenileme_araligi} sn')
 
 st.sidebar.markdown('---')
-st.sidebar.header('🎯 Tarama Hassasiyeti (Esnek Ayarlar)')
+st.sidebar.header('🎯 Tarama Hassasiyeti')
 
 piyasa_turu = st.sidebar.radio(
     'Piyasa Türü', options=['Vadeli (Futures)', 'Spot'], index=0
@@ -85,16 +69,15 @@ hacim_carpani = st.sidebar.slider(
     'Minimum Hacim Artış Katı',
     min_value=1.1,
     max_value=3.5,
-    value=1.3,
+    value=1.4,
     step=0.1,
-    help='1.3x hacim artışı fırsatları kaçırmadan yakalar.',
 )
 
 fonlama_esigi = st.sidebar.slider(
     'Eksi Fonlama Eşiği (%)',
     min_value=-0.15,
     max_value=-0.005,
-    value=-0.015,
+    value=-0.020,
     step=0.005,
     format='%.3f',
 )
@@ -148,12 +131,12 @@ def telegram_fotograf_gonder(foto_buf, caption_metni, kanal_tipi):
     url = f'https://api.telegram.org/bot{bot_token.strip()}/sendPhoto'
 
     hedef_topic = None
-    if kanal_tipi == 'LIQUIDATION' and liq_thread_id:
-      hedef_topic = str(liq_thread_id).strip()
-    elif kanal_tipi == 'LONG' and long_thread_id:
+    if kanal_tipi == 'LONG' and long_thread_id:
       hedef_topic = str(long_thread_id).strip()
     elif kanal_tipi == 'SHORT' and short_thread_id:
       hedef_topic = str(short_thread_id).strip()
+    elif kanal_tipi == 'LIQUIDATION' and liq_thread_id:
+      hedef_topic = str(liq_thread_id).strip()
     elif kanal_tipi == 'DIVERGENCE' and div_thread_id:
       hedef_topic = str(div_thread_id).strip()
 
@@ -260,8 +243,8 @@ def piyasa_tara():
             if not np.isnan(df['RSI'].iloc[-1])
             else 50.0
         )
-        min_gecmis_rsi = df['RSI'].iloc[-10:-1].min()
-        max_gecmis_rsi = df['RSI'].iloc[-10:-1].max()
+        min_gecmis_rsi = df['RSI'].iloc[-12:-1].min()
+        max_gecmis_rsi = df['RSI'].iloc[-12:-1].max()
 
         df['EMA20'] = df['Kapanis'].ewm(span=20, adjust=False).mean()
         df['EMA50'] = df['Kapanis'].ewm(span=50, adjust=False).mean()
@@ -279,11 +262,11 @@ def piyasa_tara():
         aksiyon = None
         kanal_tipi = None
 
-        # 1. 💥 LİKİDASYON SQUEEZE (Esnetilmiş Eşikler)
+        # 1. 💥 LİKİDASYON SQUEEZE (Öncelikli) -> 363 Sekmesine
         if (
             funding_rate is not None
             and funding_rate <= fonlama_esigi
-            and hacim_orani >= 1.2
+            and hacim_orani >= 1.3
         ):
           sinyal_adi = (
               f'💥 SHORT SQUEEZE ADAYI (Fonlama: %{round(funding_rate, 4)})'
@@ -293,8 +276,8 @@ def piyasa_tara():
 
         elif (
             funding_rate is not None
-            and funding_rate >= 0.05
-            and hacim_orani >= 1.2
+            and funding_rate >= 0.06
+            and hacim_orani >= 1.3
             and mum_degisimi < 0
         ):
           sinyal_adi = (
@@ -303,64 +286,64 @@ def piyasa_tara():
           aksiyon = '🔴 GÜÇLÜ SHORT'
           kanal_tipi = 'LIQUIDATION'
 
-        # 2. 📈 RSI DIVERGENCE (DİP / TEPE UYUMSUZLUĞU)
+        # 2. 🟢 LONG PUMP & KIRILIM -> 362 Sekmesine
         elif (
-            (son_kapanis <= gecmis_en_dusuk * 1.008)
-            and (son_rsi > min_gecmis_rsi + 3)
-            and (son_rsi <= 45)
+            (hacim_orani >= hacim_carpani)
+            and (son_kapanis >= gecmis_en_yuksek * 0.998)
+            and (mum_degisimi > 0)
+        ):
+          sinyal_adi = '🚀 DİRENÇ KIRILIMI / PUMP'
+          aksiyon = '🟢 LONG'
+          kanal_tipi = 'LONG'
+
+        elif (
+            (df['EMA20'].iloc[-1] >= df['EMA50'].iloc[-1])
+            and (hacim_orani >= hacim_carpani)
+            and (mum_degisimi > 0.8)
+            and (son_rsi <= 70)
+        ):
+          sinyal_adi = '⚡ HACİMLİ BOĞA TRENDİ'
+          aksiyon = '🟢 LONG'
+          kanal_tipi = 'LONG'
+
+        # 3. 🔴 SHORT DUMP & DÜŞÜŞ -> 360 Sekmesine
+        elif (
+            (hacim_orani >= hacim_carpani)
+            and (son_kapanis <= gecmis_en_dusuk * 1.002)
+            and (mum_degisimi < 0)
+        ):
+          sinyal_adi = '🩸 DESTEK KIRILIMI / DUMP'
+          aksiyon = '🔴 SHORT'
+          kanal_tipi = 'SHORT'
+
+        elif (
+            (df['EMA20'].iloc[-1] <= df['EMA50'].iloc[-1])
+            and (hacim_orani >= hacim_carpani)
+            and (mum_degisimi < -0.8)
+            and (son_rsi >= 30)
+        ):
+          sinyal_adi = '⚡ HACİMLİ AYI BASKISI'
+          aksiyon = '🔴 SHORT'
+          kanal_tipi = 'SHORT'
+
+        # 4. 📈 RSI DIVERGENCE (Gerçek Uyumsuzluk) -> 364 Sekmesine
+        elif (
+            (son_kapanis < gecmis_en_dusuk)
+            and (son_rsi > min_gecmis_rsi + 5)
+            and (son_rsi <= 35)
         ):
           sinyal_adi = '📈 POZİTİF UYUMSUZLUK (DİP DÖNÜŞ)'
           aksiyon = '🟢 LONG'
           kanal_tipi = 'DIVERGENCE'
 
         elif (
-            (son_kapanis >= gecmis_en_yuksek * 0.992)
-            and (son_rsi < max_gecmis_rsi - 3)
-            and (son_rsi >= 58)
+            (son_kapanis > gecmis_en_yuksek)
+            and (son_rsi < max_gecmis_rsi - 5)
+            and (son_rsi >= 65)
         ):
           sinyal_adi = '📉 NEGATİF UYUMSUZLUK (TEPE DÖNÜŞ)'
           aksiyon = '🔴 SHORT'
           kanal_tipi = 'DIVERGENCE'
-
-        # 3. ⚡ TREND & HACİM BAŞLANGICI
-        elif (
-            (df['EMA20'].iloc[-1] >= df['EMA50'].iloc[-1])
-            and (hacim_orani >= hacim_carpani)
-            and (mum_degisimi > 0.6)
-            and (son_rsi <= 72)
-        ):
-          sinyal_adi = '⚡ HACİMLİ BOĞA ATAĞI (TREND)'
-          aksiyon = '🟢 LONG'
-          kanal_tipi = 'LONG'
-
-        elif (
-            (df['EMA20'].iloc[-1] <= df['EMA50'].iloc[-1])
-            and (hacim_orani >= hacim_carpani)
-            and (mum_degisimi < -0.6)
-            and (son_rsi >= 28)
-        ):
-          sinyal_adi = '⚡ HACİMLİ AYI BASKISI (TREND)'
-          aksiyon = '🔴 SHORT'
-          kanal_tipi = 'SHORT'
-
-        # 4. 🚀 DİRENÇ / DESTEK REAKSİYONU
-        elif (
-            (hacim_orani >= (hacim_carpani * 1.1))
-            and (son_kapanis >= gecmis_en_yuksek * 0.998)
-            and (mum_degisimi > 0)
-        ):
-          sinyal_adi = '🚀 DİRENÇ TESTİ / KIRILIM'
-          aksiyon = '🟢 LONG'
-          kanal_tipi = 'LONG'
-
-        elif (
-            (hacim_orani >= (hacim_carpani * 1.1))
-            and (son_kapanis <= gecmis_en_dusuk * 1.002)
-            and (mum_degisimi < 0)
-        ):
-          sinyal_adi = '🩸 DESTEK KIRILIMI / DÜŞÜŞ'
-          aksiyon = '🔴 SHORT'
-          kanal_tipi = 'SHORT'
 
         if kanal_tipi is not None:
           temiz_parite = sembol.split(':')[0]
@@ -431,7 +414,7 @@ def piyasa_tara():
 manuel_tara = st.button('🔍 Şimdi Tara', type='primary', use_container_width=True)
 
 if oto_yenileme or manuel_tara:
-  with st.spinner('Piyasa taranıyor ve fırsatlar tespit ediliyor...'):
+  with st.spinner('Piyasa taranıyor ve ilgili kanallara ayrıştırılıyor...'):
     df_sonuc = piyasa_tara()
 
   if not df_sonuc.empty:
@@ -449,6 +432,6 @@ if oto_yenileme or manuel_tara:
     )
   else:
     st.info(
-        'Şu an seçili zaman diliminde aktif hacim atağı bulunamadı.'
-        ' (Dilerseniz zaman dilimini 5m / 15m yaparak tekrar deneyin).'
+        'Seçilen kriterlere uygun fırsat bulunamadı.'
+        f' ({pd.Timestamp.now().strftime("%H:%M:%S")})'
     )
