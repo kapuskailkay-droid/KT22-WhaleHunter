@@ -125,7 +125,6 @@ def fetch_total3_data():
     }
 
 
-# Üst Bilgi Kartı
 total3_info = fetch_total3_data()
 col_m1, col_m2, col_m3 = st.columns(3)
 with col_m1:
@@ -284,6 +283,11 @@ def piyasa_tara():
             if not np.isnan(df['RSI'].iloc[-1])
             else 50.0
         )
+        onceki_rsi = (
+            round(df['RSI'].iloc[-2], 1)
+            if not np.isnan(df['RSI'].iloc[-2])
+            else 50.0
+        )
         min_gecmis_rsi = df['RSI'].iloc[-12:-1].min()
         max_gecmis_rsi = df['RSI'].iloc[-12:-1].max()
 
@@ -309,11 +313,12 @@ def piyasa_tara():
         sinyal_adi = None
         aksiyon = None
 
-        # 1. 🔥 TOTAL3 AYRIŞMASI
+        # 1. 🔥 TOTAL3 AYRIŞMASI (Onaylı)
         if (
             total3_change <= -0.5
             and coin_24h_change >= 1.5
             and hacim_orani >= 1.2
+            and mum_degisimi > 0
         ):
           sinyal_adi = (
               f'🔥 ALFA BOĞA (TOTAL3 Düşerken Güçlenen / +%{coin_24h_change})'
@@ -324,17 +329,19 @@ def piyasa_tara():
             total3_change >= 0.8
             and coin_24h_change <= -1.2
             and hacim_orani >= 1.2
+            and mum_degisimi < 0
         ):
           sinyal_adi = (
               f'🩸 ALFA AYI (TOTAL3 Yükselirken Düşen / %{coin_24h_change})'
           )
           aksiyon = '🔴 GÜÇLÜ SHORT'
 
-        # 2. 💥 LİKİDASYON SQUEEZE
+        # 2. 💥 LİKİDASYON SQUEEZE (Onaylı)
         elif (
             funding_rate is not None
             and funding_rate <= fonlama_esigi
             and hacim_orani >= 1.3
+            and mum_degisimi > 0
         ):
           sinyal_adi = (
               f'💥 SHORT SQUEEZE ADAYI (Fonlama: %{round(funding_rate, 4)})'
@@ -356,7 +363,7 @@ def piyasa_tara():
         elif (
             (hacim_orani >= hacim_carpani)
             and (son_kapanis >= gecmis_en_yuksek * 0.998)
-            and (mum_degisimi > 0)
+            and (mum_degisimi > 0.5)
         ):
           sinyal_adi = '🚀 DİRENÇ KIRILIMI / PUMP'
           aksiyon = '🟢 LONG'
@@ -374,7 +381,7 @@ def piyasa_tara():
         elif (
             (hacim_orani >= hacim_carpani)
             and (son_kapanis <= gecmis_en_dusuk * 1.002)
-            and (mum_degisimi < 0)
+            and (mum_degisimi < -0.5)
         ):
           sinyal_adi = '🩸 DESTEK KIRILIMI / DUMP'
           aksiyon = '🔴 SHORT'
@@ -388,21 +395,23 @@ def piyasa_tara():
           sinyal_adi = '⚡ HACİMLİ AYI BASKISI'
           aksiyon = '🔴 SHORT'
 
-        # 5. 📈 RSI DIVERGENCE (Uyumsuzluk)
+        # 5. 📈 RSI DIVERGENCE (DÜZELTİLMİŞ GÜVENLİ FİLTRE: Yeşil Mum + RSI Kafayı Kaldırdı)
         elif (
-            (son_kapanis < gecmis_en_dusuk)
-            and (son_rsi > min_gecmis_rsi + 5)
-            and (son_rsi <= 35)
-        ):
-          sinyal_adi = '📈 POZİTİF UYUMSUZLUK (DİP DÖNÜŞ)'
+            (son_kapanis <= gecmis_en_dusuk * 1.01)
+            and (mum_degisimi > 0.3)  # MUTLAKA YEŞİL DÖNÜŞ MUMU
+            and (son_rsi > onceki_rsi + 2)  # RSI YUKARI DÖNDÜ
+            and (20 <= son_rsi <= 40)
+        ):  # DİPTE SÜRÜNEN DEĞİL, DÖNEN RSI
+          sinyal_adi = '📈 POZİTİF UYUMSUZLUK (ONAYLI DİP DÖNÜŞ)'
           aksiyon = '🟢 LONG'
 
         elif (
-            (son_kapanis > gecmis_en_yuksek)
-            and (son_rsi < max_gecmis_rsi - 5)
-            and (son_rsi >= 65)
+            (son_kapanis >= gecmis_en_yuksek * 0.99)
+            and (mum_degisimi < -0.3)  # MUTLAKA KIRMIZI TEPE MUMU
+            and (son_rsi < onceki_rsi - 2)  # RSI AŞAĞI DÖNDÜ
+            and (60 <= son_rsi <= 80)
         ):
-          sinyal_adi = '📉 NEGATİF UYUMSUZLUK (TEPE DÖNÜŞ)'
+          sinyal_adi = '📉 NEGATİF UYUMSUZLUK (ONAYLI TEPE DÖNÜŞ)'
           aksiyon = '🔴 SHORT'
 
         if aksiyon is not None:
@@ -419,7 +428,7 @@ def piyasa_tara():
 
           sinyal_anahtari = f'{temiz_parite}_{sinyal_adi}_{zaman_dilimi}'
 
-          # --- SKOR VE TEKRAR SAYACI HESAPLAMA ---
+          # Skorlama
           if sinyal_anahtari in st.session_state.sinyal_skorlari:
             st.session_state.sinyal_skorlari[sinyal_anahtari]['count'] += 1
           else:
@@ -430,7 +439,6 @@ def piyasa_tara():
 
           skor = st.session_state.sinyal_skorlari[sinyal_anahtari]['count']
 
-          # Skor Metni Formatı
           if skor == 1:
             skor_metni = '1x (İlk Tespit 🎯)'
             skor_tablo = '⭐ 1x'
@@ -493,7 +501,7 @@ def piyasa_tara():
 manuel_tara = st.button('🔍 Şimdi Tara', type='primary', use_container_width=True)
 
 if oto_yenileme or manuel_tara:
-  with st.spinner('Piyasa taranıyor, skorlar hesaplanıyor...'):
+  with st.spinner('Piyasa güvenli filtrelerle taranıyor...'):
     df_sonuc = piyasa_tara()
 
   if not df_sonuc.empty:
@@ -511,6 +519,6 @@ if oto_yenileme or manuel_tara:
     )
   else:
     st.info(
-        'Seçilen kriterlere uygun fırsat bulunamadı.'
+        'Seçilen kriterlere uygun onaylanmış fırsat bulunamadı.'
         f' ({pd.Timestamp.now().strftime("%H:%M:%S")})'
     )
