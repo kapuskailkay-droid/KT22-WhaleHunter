@@ -1,25 +1,11 @@
-import sys
-import subprocess
-import pkg_resources
-
-# Eksik kütüphaneleri otomatik kurma bölümü
-required = {'streamlit', 'ccxt', 'pandas'}
-installed = {pkg.key for pkg in pkg_resources.working_set}
-missing = required - installed
-
-if missing:
-    python = sys.executable
-    subprocess.check_call([python, '-m', 'pip', 'install', *missing], stdout=subprocess.DEVNULL)
-
 import streamlit as st
 import ccxt
 import pandas as pd
 
-# Sayfa Ayarları
 st.set_page_config(page_title="Balina Avcısı", layout="wide")
 
 st.title("🐋 MEXC Balina Sinyal Tarayıcı")
-st.write("Son 15 dakikalık periyotta, geçmiş ortalamasına göre %300'den fazla hacim (para) girişi olan coinleri yakalar.")
+st.write("Son 15 dakikalık periyotta, geçmiş ortalamasına göre %300'den fazla hacim girişi olan coinleri yakalar.")
 
 def balinalari_bul():
     mexc = ccxt.mexc()
@@ -54,7 +40,7 @@ def balinalari_bul():
             pass
             
         progress_bar.progress((i + 1) / len(hedef_coinler))
-        durum_metni.text(f"Derin sular taranıyor: {sembol} ({i+1}/{len(hedef_coinler)})")
+        durum_metni.text(f"Taranıyor: {sembol} ({i+1}/{len(hedef_coinler)})")
         
     progress_bar.empty()
     durum_metni.empty()
