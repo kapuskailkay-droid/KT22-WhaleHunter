@@ -2,15 +2,26 @@ import streamlit as st
 import ccxt
 import pandas as pd
 import numpy as np
+import requests
 from streamlit_autorefresh import st_autorefresh
 
 # Sayfa Yapılandırması
-st.set_page_config(page_title="MEXC Vadeli & Spot Sinyal Radarı", layout="wide")
+st.set_page_config(page_title="MEXC Telegram Sinyal Radarı", layout="wide")
+
+# Sinyal Hafızası (Spam engellemek için)
+if 'gonderilen_sinyaller' not in st.session_state:
+    st.session_state.gonderilen_sinyaller = set()
 
 # --- YAN MENÜ ---
-st.sidebar.header("⚙️ Canlı Yayın Ayarları")
+st.sidebar.header("📱 Telegram Bildirim Ayarları")
+telegram_aktif = st.sidebar.checkbox("🚀 Telegram'a Sinyal Gönder", value=False)
+bot_token = st.sidebar.text_input("Telegram Bot Token", type="password", placeholder="7123456...:AAFlk...")
+chat_id = st.sidebar.text_input("Telegram Chat ID", placeholder="123456789")
 
-oto_yenileme = st.sidebar.checkbox("🔄 Otomatik Taramayı Aç", value=False)
+st.sidebar.markdown("---")
+st.sidebar.header("⚙️ Canlı Yayın & Tarama")
+
+oto_yenileme = st.sidebar.checkbox("🔄 Otomatik Canlı Taramayı Aç", value=False)
 yenileme_araligi = st.sidebar.selectbox(
     "Tarama Sıklığı",
     options=[15, 30, 60, 120, 300],
@@ -56,8 +67,7 @@ squeeze_esigi = st.sidebar.slider(
     min_value=1.0,
     max_value=10.0,
     value=4.0,
-    step=0.5,
-    help="Bant ne kadar dar ise kırılım o kadar şiddetli olur."
+    step=0.5
 )
 
 coin_adedi = st.sidebar.select_slider(
@@ -67,8 +77,22 @@ coin_adedi = st.sidebar.select_slider(
 )
 
 # Başlık
-st.title(f"⚡ MEXC {piyasa_turu} Filtreli Sinyal Radarı")
-st.caption(f"Filtre: **{sinyal_filtresi}** | Zaman Dilimi: **{zaman_dilimi}**")
+st.title(f"⚡ MEXC {piyasa_turu} Otomatik & Telegram Sinyal Radarı")
+
+# --- TELEGRAM MESAJ FONKSİYONU ---
+def telegram_mesaj_gonder(mesaj):
+    if telegram_aktif and bot_token and chat_id:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": mesaj,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False
+        }
+        try:
+            requests.post(url, json=payload, timeout=5)
+        except Exception:
+            pass
 
 # --- İNDİKATÖR HESAPLAMALARI ---
 def hesapla_rsi(seri, periyot=14):
@@ -119,7 +143,6 @@ def piyasa_tara():
                 son_hacim = df['Hacim'].iloc[-1]
                 son_kapanis = df['Kapanis'].iloc[-1]
                 son_acilis = df['Acilis'].iloc[-1]
-                son_yuksek = df['Yuksek'].iloc[-1]
                 gecmis_en_yuksek = df['Yuksek'].iloc[:-1].max()
                 
                 df['RSI'] = hesapla_rsi(df['Kapanis'])
@@ -133,7 +156,7 @@ def piyasa_tara():
                 aksiyon = None
                 kategori = None
 
-                # 1. Bollinger Squeeze Kontrolü
+                # 1. Bollinger Squeeze
                 if bb_genislik <= squeeze_esigi:
                     sinyal_adi = f"🗜️ SQUEEZE (Bant: %{bb_genislik})"
                     aksiyon = "🟡 SIKIŞMA"
@@ -187,6 +210,24 @@ def piyasa_tara():
                     else:
                         mexc_link = f"https://www.mexc.com/tr-TR/exchange/{mexc_kod}"
                     
+                    sinyal_id = f"{temiz_parite}_{sinyal_adi}_{zaman_dilimi}"
+                    
+                    # Telegram Bildirimi Gönder (Daha önce gönderilmediyse)
+                    if telegram_aktif and sinyal_id not in st.session_state.gonderilen_sinyaller:
+                        tg_mesaj = (
+                            f"🚨 <b>MEXC {piyasa_turu.upper()} SİNYALİ</b>\n\n"
+                            f"📌 <b>Parite:</b> {temiz_parite}\n"
+                            f"🎯 <b>Yön:</b> {aksiyon}\n"
+                            f"⚡ <b>Sinyal:</b> {sinyal_adi}\n"
+                            f"⏱ <b>Zaman Dilimi:</b> {zaman_dilimi}\n"
+                            f"💰 <b>Fiyat:</b> {son_kapanis} $\n"
+                            f"📊 <b>Hacim Katı:</b> {round(hacim_orani, 1)}x\n"
+                            f"📈 <b>RSI (14):</b> {son_rsi}\n\n"
+                            f"🔗 <a href='{mexc_link}'>MEXC Grafiği Aç</a>"
+                        )
+                        telegram_mesaj_gonder(tg_mesaj)
+                        st.session_state.gonderilen_sinyaller.add(sinyal_id)
+
                     sinyaller.append({
                         "Yön": aksiyon,
                         "Sinyal Detayı": sinyal_adi,
@@ -223,4 +264,4 @@ if oto_yenileme or manuel_tara:
             use_container_width=True
         )
     else:
-        st.info(f"Seçilen filtreye ({sinyal_filtresi}) uygun sonuç bulunamadı ({pd.Timestamp.now().strftime('%H:%M:%S')}).")
+        st.info(f"Seçilen filtreye uygun sonuç bulunamadı ({pd.Timestamp.now().strftime('%H:%M:%S')}).")
