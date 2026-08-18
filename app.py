@@ -14,23 +14,23 @@ st.sidebar.header("🎯 Strateji & Filtre Ayarları")
 
 zaman_dilimi = st.sidebar.selectbox(
     "Zaman Dilimi (Timeframe)",
-    options=["5m", "15m", "1h", "4h"],
+    options=["5m", "15m", "1h", "4h", "1d", "1w"],
     index=1,
-    help="Scalp için 5m/15m, swing için 1h/4h önerilir."
+    help="Scalp için 5m/15m, swing için 1h/4h, ana trend ve büyük dalgalar için 1d/1w seçin."
 )
 
 hacim_carpani = st.sidebar.slider(
     "Minimum Hacim Patlama Katı",
-    min_value=1.5,
+    min_value=1.2,
     max_value=5.0,
     value=2.0,
-    step=0.5,
-    help="Son mumun hacmi, önceki 19 mum ortalamasının kaç katı olsun?"
+    step=0.1,
+    help="Son mumun hacmi, geçmiş mumların ortalamasının kaç katı olsun?"
 )
 
 coin_adedi = st.sidebar.select_slider(
     "Taranacak En Yüksek Hacimli Coin Sayısı",
-    options=[30, 50, 100, 150],
+    options=[30, 50, 100, 150, 200],
     value=50
 )
 
@@ -66,7 +66,8 @@ def futures_tara():
 
     for i, sembol in enumerate(hedef_listesi):
         try:
-            mumlar = mexc.fetch_ohlcv(sembol, timeframe=zaman_dilimi, limit=25)
+            # Günlük ve haftalık veriler için 35 mum çekiyoruz
+            mumlar = mexc.fetch_ohlcv(sembol, timeframe=zaman_dilimi, limit=35)
             if len(mumlar) >= 20:
                 df = pd.DataFrame(mumlar, columns=['Zaman', 'Acilis', 'Yuksek', 'Dusuk', 'Kapanis', 'Hacim'])
                 
@@ -140,8 +141,6 @@ if st.button("🔥 Vadeli Sinyalleri Tara", type="primary", use_container_width=
     
     if not df_sonuc.empty:
         st.success(f"Piyasada {len(df_sonuc)} adet vadeli işlem fırsatı tespit edildi!")
-        
-        # Link sütununu tıklanabilir link haline getirelim
         st.dataframe(
             df_sonuc,
             column_config={
@@ -153,4 +152,4 @@ if st.button("🔥 Vadeli Sinyalleri Tara", type="primary", use_container_width=
             use_container_width=True
         )
     else:
-        st.info("Şu anda seçtiğiniz filtrelere uyan net bir kırılım/tuzak sinyali yok. Hacim katsayısını 1.5x yaparak tekrar deneyebilirsiniz.")
+        st.info("Şu anda seçtiğiniz filtrelere uyan net bir sinyal bulunamadı. Hacim çarpanını düşürerek veya farklı bir zaman dilimi seçerek tekrar deneyebilirsiniz.")
