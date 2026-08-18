@@ -16,7 +16,8 @@ if 'gonderilen_sinyaller' not in st.session_state:
 st.sidebar.header("📱 Telegram Bildirim Ayarları")
 telegram_aktif = st.sidebar.checkbox("🚀 Telegram'a Sinyal Gönder", value=False)
 bot_token = st.sidebar.text_input("Telegram Bot Token", type="password", placeholder="7123456...:AAFlk...")
-chat_id = st.sidebar.text_input("Telegram Chat ID", placeholder="123456789")
+chat_id = st.sidebar.text_input("Telegram Chat ID", placeholder="-100xxxxxxxxxx")
+thread_id = st.sidebar.text_input("Konu / Topic ID (HUNTER ID'si)", placeholder="Örn: 2, 45, 123", help="Mesajların özel alt sekmenize (HUNTER) gitmesi için konu ID'sini girin.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Canlı Yayın & Tarama")
@@ -89,6 +90,14 @@ def telegram_mesaj_gonder(mesaj):
             "parse_mode": "HTML",
             "disable_web_page_preview": False
         }
+        
+        # Konu (HUNTER sekmesi) ID'si girilmişse mesaja ekle
+        if thread_id and thread_id.strip():
+            try:
+                payload["message_thread_id"] = int(thread_id.strip())
+            except ValueError:
+                pass
+                
         try:
             requests.post(url, json=payload, timeout=5)
         except Exception:
@@ -212,7 +221,7 @@ def piyasa_tara():
                     
                     sinyal_id = f"{temiz_parite}_{sinyal_adi}_{zaman_dilimi}"
                     
-                    # Telegram Bildirimi Gönder (Daha önce gönderilmediyse)
+                    # Telegram Gönderimi
                     if telegram_aktif and sinyal_id not in st.session_state.gonderilen_sinyaller:
                         tg_mesaj = (
                             f"🚨 <b>MEXC {piyasa_turu.upper()} SİNYALİ</b>\n\n"
