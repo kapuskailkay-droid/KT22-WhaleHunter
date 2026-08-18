@@ -1,4 +1,5 @@
 import io
+import time
 import urllib.parse
 import ccxt
 import matplotlib
@@ -13,13 +14,13 @@ matplotlib.use('Agg')
 
 # --- SAYFA YAPILANDIRMASI ---
 st.set_page_config(
-    page_title='MEXC VIP Algoritmik Sinyal Radarı', layout='wide'
+    page_title='MEXC VIP Algoritmik & TOTAL3 Sinyal Radarı', layout='wide'
 )
 
 if 'gonderilen_sinyaller' not in st.session_state:
   st.session_state.gonderilen_sinyaller = set()
 
-# --- YAN PANEL: TELEGRAM AYARLARI (TEK KANAL) ---
+# --- YAN PANEL: TELEGRAM AYARLARI ---
 st.sidebar.header('📱 Telegram Bildirim Ayarları')
 telegram_aktif = st.sidebar.checkbox('🚀 Telegram\'a Sinyal Gönder', value=True)
 bot_token = st.sidebar.text_input(
@@ -28,14 +29,10 @@ bot_token = st.sidebar.text_input(
     placeholder='BotFather\'dan aldığınız token',
 )
 chat_id = st.sidebar.text_input('Telegram Chat ID', value='-1004434260285')
-
 topic_id = st.sidebar.text_input(
     'Telegram Konu (Topic) ID',
     value='73',
-    help=(
-        'Tüm sinyallerin toplanacağı tek konunun ID numarası (Örn: 73 veya'
-        ' 364). Ana grup için boş bırakabilirsiniz.'
-    ),
+    help='Mesajların gideceği Konu ID numarası',
 )
 
 st.sidebar.markdown('---')
@@ -54,7 +51,7 @@ if oto_yenileme:
   st.sidebar.success(f'🟢 Canlı mod aktif: Her {yenileme_araligi} sn')
 
 st.sidebar.markdown('---')
-st.sidebar.header('🎯 Tarama Hassasiyeti')
+st.sidebar.header('🎯 Tarama & Strateji Parametreleri')
 
 piyasa_turu = st.sidebar.radio(
     'Piyasa Türü', options=['Vadeli (Futures)', 'Spot'], index=0
@@ -89,7 +86,59 @@ coin_adedi = st.sidebar.select_slider(
     value=100,
 )
 
-st.title(f'⚡ MEXC {piyasa_turu} VIP Algoritmik Sinyal Radarı')
+st.title(f'⚡ MEXC {piyasa_turu} VIP Algoritmik & TOTAL3 Ayrışma Radarı')
+
+
+# --- CANLI TOTAL3 ÇEKİCİ (COINGECKO API) ---
+@st.cache_data(ttl=60)
+def fetch_total3_data():
+  try:
+    url = 'https://api.coingecko.com/api/v3/global'
+    res = requests.get(url, timeout=5).json()
+    data = res.get('data', {})
+
+    total_market_cap = data.get('total_market_cap', {}).get('usd', 0)
+    market_cap_percentage = data.get('market_cap_percentage', {})
+
+    btc_pct = market_cap_percentage.get('btc', 0)
+    eth_pct = market_cap_percentage.get('eth', 0)
+
+    # TOTAL3 = Total - (BTC + ETH)
+    total3_val = total_market_cap * (1 - (btc_pct + eth_pct) / 100)
+    total3_billions = round(total3_val / 1e9, 2)
+
+    total_cap_change_24h = data.get(
+        'market_cap_change_percentage_24h_usd', 0.0
+    )
+
+    return {
+        'total3_mcap': total3_billions,
+        'change_24h': round(total_cap_change_24h, 2),
+        'btc_dom': round(btc_pct, 1),
+        'eth_dom': round(eth_pct, 1),
+    }
+  except Exception:
+    return {
+        'total3_mcap': 0,
+        'change_24h': 0.0,
+        'btc_dom': 0.0,
+        'eth_dom': 0.0,
+    }
+
+
+# Üst Bilgi Kartı
+total3_info = fetch_total3_data()
+col_m1, col_m2, col_m3 = st.columns(3)
+with col_m1:
+  st.metric(
+      '🌐 TOTAL3 Market Cap (Altcoinler)',
+      f"{total3_info['total3_mcap']} Milyar $",
+      f"{total3_info['change_24h']}% (24s)",
+  )
+with col_m2:
+  st.metric('🟠 BTC Dominance', f"%{total3_info['btc_dom']}")
+with col_m3:
+  st.metric('🔷 ETH Dominance', f"%{total3_info['eth_dom']}")
 
 
 # --- GRAFİK OLUŞTURMA ---
@@ -126,7 +175,7 @@ def grafik_olustur(df_mum, sembol, zaman_dilimi):
   return buf
 
 
-# --- TELEGRAM MESAJ GÖNDERME (TEK MERKEZE) ---
+# --- TELEGRAM MESAJ GÖNDERME ---
 def telegram_fotograf_gonder(foto_buf, caption_metni):
   if telegram_aktif and bot_token and chat_id:
     url = f'https://api.telegram.org/bot{bot_token.strip()}/sendPhoto'
@@ -186,6 +235,8 @@ def hesapla_tp_sl(fiyat, atr, yon='LONG'):
 # --- PİYASA TARAMA MOTORU ---
 def piyasa_tara():
   is_futures = piyasa_turu == 'Vadeli (Futures)'
+  t3_data = fetch_total3_data()
+  total3_change = t3_data['change_24h']
 
   if is_futures:
     mexc = ccxt.mexc(
@@ -244,6 +295,13 @@ def piyasa_tara():
         hacim_orani = son_hacim / gecmis_hacim if gecmis_hacim > 0 else 0
         mum_degisimi = ((son_kapanis - son_acilis) / son_acilis) * 100
 
+        # 24s Değişim (Coin Ticker)
+        coin_24h_change = (
+            float(t_info.get('percentage', 0) or 0)
+            if 'percentage' in t_info
+            else mum_degisimi
+        )
+
         # Fonlama Oranı
         funding_rate = None
         if is_futures and 'info' in t_info:
@@ -252,8 +310,31 @@ def piyasa_tara():
         sinyal_adi = None
         aksiyon = None
 
-        # 1. 💥 LİKİDASYON SQUEEZE
+        # 1. 🔥 TOTAL3 GÖRECELİ GÜÇ (RELATIVE STRENGTH / WEAKNESS)
+        # TOTAL3 düşerken coin güçlü kalıp hacimle yükseliyorsa
         if (
+            total3_change <= -0.5
+            and coin_24h_change >= 1.5
+            and hacim_orani >= 1.2
+        ):
+          sinyal_adi = (
+              f'🔥 ALFA BOĞA (TOTAL3 Düşerken Güçlenen / +%{coin_24h_change})'
+          )
+          aksiyon = '🟢 GÜÇLÜ LONG'
+
+        # TOTAL3 yükselirken coin zayıf kalıp düşüyorsa
+        elif (
+            total3_change >= 0.8
+            and coin_24h_change <= -1.2
+            and hacim_orani >= 1.2
+        ):
+          sinyal_adi = (
+              f'🩸 ALFA AYI (TOTAL3 Yükselirken Düşen / %{coin_24h_change})'
+          )
+          aksiyon = '🔴 GÜÇLÜ SHORT'
+
+        # 2. 💥 LİKİDASYON SQUEEZE
+        elif (
             funding_rate is not None
             and funding_rate <= fonlama_esigi
             and hacim_orani >= 1.3
@@ -274,7 +355,7 @@ def piyasa_tara():
           )
           aksiyon = '🔴 GÜÇLÜ SHORT'
 
-        # 2. 🟢 LONG PUMP & KIRILIM
+        # 3. 🚀 LONG PUMP & KIRILIM
         elif (
             (hacim_orani >= hacim_carpani)
             and (son_kapanis >= gecmis_en_yuksek * 0.998)
@@ -292,7 +373,7 @@ def piyasa_tara():
           sinyal_adi = '⚡ HACİMLİ BOĞA TRENDİ'
           aksiyon = '🟢 LONG'
 
-        # 3. 🔴 SHORT DUMP & DÜŞÜŞ
+        # 4. 🔴 SHORT DUMP & DÜŞÜŞ
         elif (
             (hacim_orani >= hacim_carpani)
             and (son_kapanis <= gecmis_en_dusuk * 1.002)
@@ -310,7 +391,7 @@ def piyasa_tara():
           sinyal_adi = '⚡ HACİMLİ AYI BASKISI'
           aksiyon = '🔴 SHORT'
 
-        # 4. 📈 RSI DIVERGENCE (Gerçek Uyumsuzluk)
+        # 5. 📈 RSI DIVERGENCE (Uyumsuzluk)
         elif (
             (son_kapanis < gecmis_en_dusuk)
             and (son_rsi > min_gecmis_rsi + 5)
@@ -356,8 +437,9 @@ def piyasa_tara():
                 f'📌 <b>Parite:</b> {temiz_parite}\n'
                 f'🎯 <b>Yön:</b> {aksiyon}\n'
                 f'⚡ <b>Strateji:</b> {sinyal_adi}\n'
+                f'🌐 <b>TOTAL3 (24s):</b> %{total3_change}\n'
                 f'⏱ <b>Zaman:</b> {zaman_dilimi}\n'
-                f'💰 <b>Giriş Fiyatı:</b> {son_kapanis} $\n'
+                f'💰 <b>Giriş:</b> {son_kapanis} $\n'
                 f'📊 <b>Hacim Katı:</b> {round(hacim_orani, 1)}x'
                 f'{fonlama_bilgi}\n'
                 f'📈 <b>RSI (14):</b> {son_rsi}\n\n'
@@ -395,7 +477,9 @@ def piyasa_tara():
 manuel_tara = st.button('🔍 Şimdi Tara', type='primary', use_container_width=True)
 
 if oto_yenileme or manuel_tara:
-  with st.spinner('Tüm piyasa taranıyor ve sinyaller Telegram\'a aktarılıyor...'):
+  with st.spinner(
+      'TOTAL3 verileri ve MEXC pariteleri taranıyor, Telegram\'a aktarılıyor...'
+  ):
     df_sonuc = piyasa_tara()
 
   if not df_sonuc.empty:
