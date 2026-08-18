@@ -6,18 +6,23 @@ import requests
 from streamlit_autorefresh import st_autorefresh
 
 # Sayfa Yapılandırması
-st.set_page_config(page_title="MEXC Telegram Sinyal Radarı", layout="wide")
+st.set_page_config(page_title="MEXC Akıllı Sinyal Radarı", layout="wide")
 
 # Sinyal Hafızası (Spam engellemek için)
 if 'gonderilen_sinyaller' not in st.session_state:
     st.session_state.gonderilen_sinyaller = set()
 
 # --- YAN MENÜ ---
-st.sidebar.header("📱 Telegram Bildirim Ayarları")
-telegram_aktif = st.sidebar.checkbox("🚀 Telegram'a Sinyal Gönder", value=False)
-bot_token = st.sidebar.text_input("Telegram Bot Token", type="password", placeholder="7123456...:AAFlk...")
-chat_id = st.sidebar.text_input("Telegram Chat ID", placeholder="-100xxxxxxxxxx")
-thread_id = st.sidebar.text_input("Konu / Topic ID (HUNTER ID'si)", placeholder="Örn: 2, 45, 123", help="Mesajların özel alt sekmenize (HUNTER) gitmesi için konu ID'sini girin.")
+st.sidebar.header("📱 Telegram Oda & Bildirim Ayarları")
+telegram_aktif = st.sidebar.checkbox("🚀 Telegram'a Sinyal Gönder", value=True)
+bot_token = st.sidebar.text_input("Telegram Bot Token", type="password", placeholder="Bot token yapıştırın")
+chat_id = st.sidebar.text_input("Telegram Chat ID", value="-1004434260285")
+
+col_tg1, col_tg2 = st.sidebar.columns(2)
+with col_tg1:
+    long_thread_id = st.text_input("🟢 LONG Topic ID", value="73", help="Long sinyallerinin gideceği sekme ID")
+with col_tg2:
+    short_thread_id = st.text_input("🔴 SHORT Topic ID", placeholder="Örn: 74", help="Short sinyallerinin gideceği sekme ID")
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Canlı Yayın & Tarama")
@@ -45,7 +50,7 @@ piyasa_turu = st.sidebar.radio(
 
 sinyal_filtresi = st.sidebar.selectbox(
     "Hangi Sinyalleri Görmek İstiyorsunuz?",
-    options=["Tümü (Long + Short + Squeeze)", "🟢 Sadece LONG", "🔴 Sadece SHORT", "🟡 Sadece SQUEEZE (Sıkışma)"],
+    options=["Tümü (Long + Short)", "🟢 Sadece LONG", "🔴 Sadece SHORT", "🟡 Sadece SQUEEZE (Sıkışma)"],
     index=0
 )
 
@@ -74,32 +79,39 @@ squeeze_esigi = st.sidebar.slider(
 coin_adedi = st.sidebar.select_slider(
     "Taranacak En Yüksek Hacimli Coin Sayısı",
     options=[30, 50, 100, 150, 200],
-    value=50
+    value=100
 )
 
-# Başlık
-st.title(f"⚡ MEXC {piyasa_turu} Otomatik & Telegram Sinyal Radarı")
+st.title(f"⚡ MEXC {piyasa_turu} Otomatik & Çift Kanallı Sinyal Radarı")
 
-# --- TELEGRAM MESAJ FONKSİYONU ---
-def telegram_mesaj_gonder(mesaj):
+# --- TELEGRAM MESAJ GÖNDERME FONKSİYONU ---
+def telegram_mesaj_gonder(mesaj, kategori):
     if telegram_aktif and bot_token and chat_id:
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        url = f"https://api.telegram.org/bot{bot_token.strip()}/sendMessage"
         payload = {
-            "chat_id": chat_id,
+            "chat_id": chat_id.strip(),
             "text": mesaj,
             "parse_mode": "HTML",
             "disable_web_page_preview": False
         }
         
-        # Konu (HUNTER sekmesi) ID'si girilmişse mesaja ekle
-        if thread_id and thread_id.strip():
+        # Yöne göre ilgili Topic ID'sini seç
+        hedef_topic = None
+        if kategori == "LONG" and long_thread_id and str(long_thread_id).strip():
+            hedef_topic = long_thread_id.strip()
+        elif kategori == "SHORT" and short_thread_id and str(short_thread_id).strip():
+            hedef_topic = short_thread_id.strip()
+        elif kategori == "SQUEEZE" and long_thread_id and str(long_thread_id).strip():
+            hedef_topic = long_thread_id.strip()
+            
+        if hedef_topic:
             try:
-                payload["message_thread_id"] = int(thread_id.strip())
+                payload["message_thread_id"] = int(hedef_topic)
             except ValueError:
                 pass
                 
         try:
-            requests.post(url, json=payload, timeout=5)
+            requests.post(url, data=payload, timeout=8)
         except Exception:
             pass
 
@@ -172,7 +184,7 @@ def piyasa_tara():
                     kategori = "SQUEEZE"
 
                 # 2. Long Sinyalleri
-                elif (hacim_orani >= hacim_carpani) and (son_kapanis >= gecmis_en_yuksek) and (45 <= son_rsi <= 75):
+                if (hacim_orani >= hacim_carpani) and (son_kapanis >= gecmis_en_yuksek) and (45 <= son_rsi <= 75):
                     sinyal_adi = "🚀 DİRENÇ KIRILIMI (PUMP)"
                     aksiyon = "🟢 LONG" if is_futures else "🟢 GÜÇLÜ AL"
                     kategori = "LONG"
@@ -201,7 +213,7 @@ def piyasa_tara():
 
                 # Filtre Kontrolü
                 uygun = False
-                if sinyal_filtresi == "Tümü (Long + Short + Squeeze)" and sinyal_adi is not None:
+                if sinyal_filtresi == "Tümü (Long + Short)" and kategori in ["LONG", "SHORT"]:
                     uygun = True
                 elif sinyal_filtresi == "🟢 Sadece LONG" and kategori == "LONG":
                     uygun = True
@@ -221,7 +233,6 @@ def piyasa_tara():
                     
                     sinyal_id = f"{temiz_parite}_{sinyal_adi}_{zaman_dilimi}"
                     
-                    # Telegram Gönderimi
                     if telegram_aktif and sinyal_id not in st.session_state.gonderilen_sinyaller:
                         tg_mesaj = (
                             f"🚨 <b>MEXC {piyasa_turu.upper()} SİNYALİ</b>\n\n"
@@ -234,7 +245,7 @@ def piyasa_tara():
                             f"📈 <b>RSI (14):</b> {son_rsi}\n\n"
                             f"🔗 <a href='{mexc_link}'>MEXC Grafiği Aç</a>"
                         )
-                        telegram_mesaj_gonder(tg_mesaj)
+                        telegram_mesaj_gonder(tg_mesaj, kategori)
                         st.session_state.gonderilen_sinyaller.add(sinyal_id)
 
                     sinyaller.append({
