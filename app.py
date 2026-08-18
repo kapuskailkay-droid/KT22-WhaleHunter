@@ -1,327 +1,444 @@
-import streamlit as st
-import ccxt
-import pandas as pd
-import numpy as np
-import requests
 import io
+import urllib.parse
+import ccxt
 import matplotlib
-matplotlib.use('Agg')
 import mplfinance as mpf
+import numpy as np
+import pandas as pd
+import requests
+import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
+matplotlib.use('Agg')
+
 # --- SAYFA YAPILANDIRMASI ---
-st.set_page_config(page_title="MEXC Telegram Sinyal Radarı", layout="wide")
+st.set_page_config(
+    page_title='MEXC Likidasyon & Sinyal Radarı', layout='wide'
+)
 
-# Tekrar eden sinyalleri engellemek için hafıza
 if 'gonderilen_sinyaller' not in st.session_state:
-    st.session_state.gonderilen_sinyaller = set()
+  st.session_state.gonderilen_sinyaller = set()
 
-# --- YAN PANEL: TELEGRAM BİLDİRİM AYARLARI ---
-st.sidebar.header("📱 Telegram Bildirim Ayarları")
-telegram_aktif = st.sidebar.checkbox("🚀 Telegram'a Sinyal Gönder", value=True)
-bot_token = st.sidebar.text_input("Telegram Bot Token", type="password", placeholder="BotFather'dan aldığınız token")
-chat_id = st.sidebar.text_input("Telegram Chat ID", value="-1004434260285")
+# --- YAN PANEL: TELEGRAM AYARLARI ---
+st.sidebar.header('📱 Telegram Bildirim Ayarları')
+telegram_aktif = st.sidebar.checkbox('🚀 Telegram\'a Sinyal Gönder', value=True)
+bot_token = st.sidebar.text_input(
+    'Telegram Bot Token',
+    type='password',
+    placeholder='BotFather\'dan aldığınız token',
+)
+chat_id = st.sidebar.text_input('Telegram Chat ID', value='-1004434260285')
 
 col_tg1, col_tg2 = st.sidebar.columns(2)
 with col_tg1:
-    long_thread_id = st.text_input("🟢 HUNTER / Long ID", value="73", help="HUNTER veya Long sekmenizin ID numarası")
+  long_thread_id = st.text_input(
+      '🟢 HUNTER / Long ID',
+      value='73',
+      help='HUNTER veya Long sekmenizin ID numarası',
+  )
 with col_tg2:
-    short_thread_id = st.text_input("🔴 Short Topic ID", value="73", help="Short sekme ID (aynı sekme için 73 bırakın)")
+  short_thread_id = st.text_input(
+      '🔴 Short Topic ID',
+      value='73',
+      help='Short sekme ID (aynı sekme için 73 bırakın)',
+  )
 
-st.sidebar.markdown("---")
-st.sidebar.header("⚙️ Canlı Yayın & Tarama Ayarları")
+st.sidebar.markdown('---')
+st.sidebar.header('⚙️ Canlı Yayın & Tarama Ayarları')
 
-oto_yenileme = st.sidebar.checkbox("🔄 Otomatik Canlı Taramayı Aç", value=False)
+oto_yenileme = st.sidebar.checkbox('🔄 Otomatik Canlı Taramayı Aç', value=False)
 yenileme_araligi = st.sidebar.selectbox(
-    "Tarama Sıklığı",
+    'Tarama Sıklığı',
     options=[15, 30, 60, 120, 300],
     index=2,
-    format_func=lambda x: f"{x} Saniyede Bir"
+    format_func=lambda x: f'{x} Saniyede Bir',
 )
 
 if oto_yenileme:
-    st_autorefresh(interval=yenileme_araligi * 1000, key="canli_tarayici")
-    st.sidebar.success(f"🟢 Canlı mod aktif: Her {yenileme_araligi} sn")
+  st_autorefresh(interval=yenileme_araligi * 1000, key='canli_tarayici')
+  st.sidebar.success(f'🟢 Canlı mod aktif: Her {yenileme_araligi} sn')
 
-st.sidebar.markdown("---")
-st.sidebar.header("🎯 Strateji & Filtreler")
+st.sidebar.markdown('---')
+st.sidebar.header('🎯 Likidasyon & Strateji Filtreleri')
 
 piyasa_turu = st.sidebar.radio(
-    "Piyasa Türü",
-    options=["Vadeli (Futures)", "Spot"],
-    index=0
+    'Piyasa Türü',
+    options=['Vadeli (Futures)', 'Spot'],
+    index=0,
+    help='Likidasyon taraması için Vadeli (Futures) seçilmelidir.',
 )
 
 sinyal_filtresi = st.sidebar.selectbox(
-    "Hangi Sinyalleri Görmek İstiyorsunuz?",
-    options=["Tümü (Long + Short)", "🟢 Sadece LONG", "🔴 Sadece SHORT", "🟡 Sadece SQUEEZE (Sıkışma)"],
-    index=0
+    'Hangi Sinyalleri Görmek İstiyorsunuz?',
+    options=[
+        'Tümü',
+        '💥 Sadece LİKİDASYON Squeeze (Özel)',
+        '🟢 Sadece LONG',
+        '🔴 Sadece SHORT',
+        '🟡 Sadece SQUEEZE (Bant Sıkışması)',
+    ],
+    index=0,
 )
 
 zaman_dilimi = st.sidebar.selectbox(
-    "Zaman Dilimi (Timeframe)",
-    options=["5m", "15m", "1h", "4h", "1d", "1w"],
-    index=1
+    'Zaman Dilimi (Timeframe)',
+    options=['5m', '15m', '1h', '4h', '1d'],
+    index=1,
+)
+
+fonlama_esigi = st.sidebar.slider(
+    'Eksi Fonlama Eşiği (%)',
+    min_value=-0.20,
+    max_value=-0.01,
+    value=-0.03,
+    step=0.01,
+    help='Bu orandan daha negatif fonlamalar Short Squeeze adayıdır.',
 )
 
 hacim_carpani = st.sidebar.slider(
-    "Minimum Hacim Patlama Katı",
+    'Minimum Hacim Patlama Katı',
     min_value=1.2,
     max_value=5.0,
     value=2.0,
-    step=0.1
-)
-
-squeeze_esigi = st.sidebar.slider(
-    "Maksimum Squeeze Bant Genişliği (%)",
-    min_value=1.0,
-    max_value=10.0,
-    value=4.0,
-    step=0.5
+    step=0.1,
 )
 
 coin_adedi = st.sidebar.select_slider(
-    "Taranacak En Yüksek Hacimli Coin Sayısı",
+    'Taranacak En Yüksek Hacimli Coin Sayısı',
     options=[30, 50, 100, 150, 200],
-    value=100
+    value=100,
 )
 
-# Başlık
-st.title(f"⚡ MEXC {piyasa_turu} Otomatik & Görselli Sinyal Radarı")
+st.title(f'⚡ MEXC {piyasa_turu} Likidasyon & Fırsat Avcısı')
+
 
 # --- GRAFİK OLUŞTURMA ---
 def grafik_olustur(df_mum, sembol, zaman_dilimi):
-    df_grafik = df_mum.copy()
-    df_grafik['Zaman'] = pd.to_datetime(df_grafik['Zaman'], unit='ms')
-    df_grafik.set_index('Zaman', inplace=True)
-    df_grafik.rename(columns={
-        'Acilis': 'Open',
-        'Yuksek': 'High',
-        'Dusuk': 'Low',
-        'Kapanis': 'Close',
-        'Hacim': 'Volume'
-    }, inplace=True)
+  df_grafik = df_mum.copy()
+  df_grafik['Zaman'] = pd.to_datetime(df_grafik['Zaman'], unit='ms')
+  df_grafik.set_index('Zaman', inplace=True)
+  df_grafik.rename(
+      columns={
+          'Acilis': 'Open',
+          'Yuksek': 'High',
+          'Dusuk': 'Low',
+          'Kapanis': 'Close',
+          'Hacim': 'Volume',
+      },
+      inplace=True,
+  )
 
-    mc = mpf.make_marketcolors(up='#00ff88', down='#ff3366', inherit=True)
-    s = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc, gridcolor='#2b2b2b')
+  mc = mpf.make_marketcolors(up='#00ff88', down='#ff3366', inherit=True)
+  s = mpf.make_mpf_style(
+      base_mpf_style='nightclouds', marketcolors=mc, gridcolor='#2b2b2b'
+  )
 
-    buf = io.BytesIO()
-    mpf.plot(
-        df_grafik.tail(30),
-        type='candle',
-        volume=True,
-        style=s,
-        title=f"{sembol} ({zaman_dilimi})",
-        savefig=dict(fname=buf, dpi=120, bbox_inches='tight')
-    )
-    buf.seek(0)
-    return buf
+  buf = io.BytesIO()
+  mpf.plot(
+      df_grafik.tail(30),
+      type='candle',
+      volume=True,
+      style=s,
+      title=f'{sembol} ({zaman_dilimi})',
+      savefig=dict(fname=buf, dpi=120, bbox_inches='tight'),
+  )
+  buf.seek(0)
+  return buf
+
 
 # --- TELEGRAM MESAJ GÖNDERME ---
 def telegram_fotograf_gonder(foto_buf, caption_metni, kategori):
-    if telegram_aktif and bot_token and chat_id:
-        url = f"https://api.telegram.org/bot{bot_token.strip()}/sendPhoto"
-        
-        hedef_topic = None
-        if kategori == "LONG" and long_thread_id and str(long_thread_id).strip():
-            hedef_topic = str(long_thread_id).strip()
-        elif kategori == "SHORT" and short_thread_id and str(short_thread_id).strip():
-            hedef_topic = str(short_thread_id).strip()
-        elif kategori == "SQUEEZE" and long_thread_id and str(long_thread_id).strip():
-            hedef_topic = str(long_thread_id).strip()
+  if telegram_aktif and bot_token and chat_id:
+    url = f'https://api.telegram.org/bot{bot_token.strip()}/sendPhoto'
 
-        params = {}
-        if hedef_topic:
-            try:
-                params["message_thread_id"] = int(hedef_topic)
-            except ValueError:
-                pass
+    hedef_topic = None
+    if kategori in ['LONG', 'LIQ_LONG', 'SQUEEZE']:
+      hedef_topic = (
+          str(long_thread_id).strip()
+          if (long_thread_id and str(long_thread_id).strip())
+          else None
+      )
+    elif kategori in ['SHORT', 'LIQ_SHORT']:
+      hedef_topic = (
+          str(short_thread_id).strip()
+          if (short_thread_id and str(short_thread_id).strip())
+          else None
+      )
 
-        data = {
-            "chat_id": chat_id.strip(),
-            "caption": caption_metni,
-            "parse_mode": "HTML"
-        }
-        files = {"photo": ("chart.png", foto_buf, "image/png")}
+    params = {}
+    if hedef_topic:
+      try:
+        params['message_thread_id'] = int(hedef_topic)
+      except ValueError:
+        pass
 
-        try:
-            requests.post(url, params=params, data=data, files=files, timeout=12)
-        except Exception:
-            pass
+    data = {
+        'chat_id': chat_id.strip(),
+        'caption': caption_metni,
+        'parse_mode': 'HTML',
+    }
+    files = {'photo': ('chart.png', foto_buf, 'image/png')}
 
-# --- TEKNİK ANALİZ İNDİKATÖRLERİ ---
+    try:
+      requests.post(url, params=params, data=data, files=files, timeout=12)
+    except Exception:
+      pass
+
+
+# --- TEKNİK ANALİZ FONKSİYONLARI ---
 def hesapla_rsi(seri, periyot=14):
-    fark = seri.diff(1)
-    kazanc = fark.clip(lower=0)
-    kayip = -fark.clip(upper=0)
-    ortalama_kazanc = kazanc.rolling(window=periyot, min_periods=periyot).mean()
-    ortalama_kayip = kayip.rolling(window=periyot, min_periods=periyot).mean()
-    rs = ortalama_kazanc / ortalama_kayip
-    return 100 - (100 / (1 + rs))
+  fark = seri.diff(1)
+  kazanc = fark.clip(lower=0)
+  kayip = -fark.clip(upper=0)
+  ortalama_kazanc = kazanc.rolling(window=periyot, min_periods=periyot).mean()
+  ortalama_kayip = kayip.rolling(window=periyot, min_periods=periyot).mean()
+  rs = ortalama_kazanc / ortalama_kayip
+  return 100 - (100 / (1 + rs))
+
 
 def hesapla_bollinger_genislik(df, periyot=20, std_kat=2):
-    sma = df['Kapanis'].rolling(window=periyot).mean()
-    std = df['Kapanis'].rolling(window=periyot).std()
-    ust_bant = sma + (std * std_kat)
-    alt_bant = sma - (std * std_kat)
-    genislik = ((ust_bant - alt_bant) / sma) * 100
-    return genislik.iloc[-1]
+  sma = df['Kapanis'].rolling(window=periyot).mean()
+  std = df['Kapanis'].rolling(window=periyot).std()
+  ust_bant = sma + (std * std_kat)
+  alt_bant = sma - (std * std_kat)
+  genislik = ((ust_bant - alt_bant) / sma) * 100
+  return genislik.iloc[-1]
+
 
 # --- PİYASA TARAMA MOTORU ---
 def piyasa_tara():
-    is_futures = (piyasa_turu == "Vadeli (Futures)")
-    
-    if is_futures:
-        mexc = ccxt.mexc({'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
-    else:
-        mexc = ccxt.mexc({'options': {'defaultType': 'spot'}, 'enableRateLimit': True})
-        
+  is_futures = piyasa_turu == 'Vadeli (Futures)'
+
+  if is_futures:
+    mexc = ccxt.mexc(
+        {'options': {'defaultType': 'swap'}, 'enableRateLimit': True}
+    )
+  else:
+    mexc = ccxt.mexc(
+        {'options': {'defaultType': 'spot'}, 'enableRateLimit': True}
+    )
+
+  try:
+    tickers = mexc.fetch_tickers()
+  except Exception as e:
+    st.error(f'MEXC Veri Hatası: {e}')
+    return pd.DataFrame()
+
+  usdt_pariteler = [s for s in tickers.keys() if '/USDT' in s]
+  usdt_pariteler.sort(
+      key=lambda x: tickers[x].get('quoteVolume', 0) or 0, reverse=True
+  )
+  hedef_listesi = usdt_pariteler[:coin_adedi]
+
+  sinyaller = []
+
+  for i, sembol in enumerate(hedef_listesi):
     try:
-        tickers = mexc.fetch_tickers()
-    except Exception as e:
-        st.error(f"MEXC Veri Hatası: {e}")
-        return pd.DataFrame()
+      t_info = tickers[sembol]
+      mumlar = mexc.fetch_ohlcv(sembol, timeframe=zaman_dilimi, limit=35)
 
-    usdt_pariteler = [s for s in tickers.keys() if '/USDT' in s]
-    usdt_pariteler.sort(key=lambda x: tickers[x].get('quoteVolume', 0) or 0, reverse=True)
-    hedef_listesi = usdt_pariteler[:coin_adedi]
+      if len(mumlar) >= 20:
+        df = pd.DataFrame(
+            mumlar,
+            columns=['Zaman', 'Acilis', 'Yuksek', 'Dusuk', 'Kapanis', 'Hacim'],
+        )
 
-    sinyaller = []
+        gecmis_hacim = df['Hacim'].iloc[:-1].mean()
+        son_hacim = df['Hacim'].iloc[-1]
+        son_kapanis = df['Kapanis'].iloc[-1]
+        son_acilis = df['Acilis'].iloc[-1]
+        gecmis_en_yuksek = df['Yuksek'].iloc[:-1].max()
 
-    for i, sembol in enumerate(hedef_listesi):
-        try:
-            mumlar = mexc.fetch_ohlcv(sembol, timeframe=zaman_dilimi, limit=35)
-            if len(mumlar) >= 20:
-                df = pd.DataFrame(mumlar, columns=['Zaman', 'Acilis', 'Yuksek', 'Dusuk', 'Kapanis', 'Hacim'])
-                
-                gecmis_hacim = df['Hacim'].iloc[:-1].mean()
-                son_hacim = df['Hacim'].iloc[-1]
-                son_kapanis = df['Kapanis'].iloc[-1]
-                son_acilis = df['Acilis'].iloc[-1]
-                gecmis_en_yuksek = df['Yuksek'].iloc[:-1].max()
-                
-                df['RSI'] = hesapla_rsi(df['Kapanis'])
-                son_rsi = round(df['RSI'].iloc[-1], 1) if not np.isnan(df['RSI'].iloc[-1]) else 50.0
-                bb_genislik = round(hesapla_bollinger_genislik(df), 2)
-                
-                hacim_orani = son_hacim / gecmis_hacim if gecmis_hacim > 0 else 0
-                mum_degisimi = ((son_kapanis - son_acilis) / son_acilis) * 100
+        df['RSI'] = hesapla_rsi(df['Kapanis'])
+        son_rsi = (
+            round(df['RSI'].iloc[-1], 1)
+            if not np.isnan(df['RSI'].iloc[-1])
+            else 50.0
+        )
+        bb_genislik = round(hesapla_bollinger_genislik(df), 2)
 
-                sinyal_adi = None
-                aksiyon = None
-                kategori = None
+        hacim_orani = son_hacim / gecmis_hacim if gecmis_hacim > 0 else 0
+        mum_degisimi = ((son_kapanis - son_acilis) / son_acilis) * 100
 
-                # 1. Bollinger Squeeze
-                if bb_genislik <= squeeze_esigi:
-                    sinyal_adi = f"🗜️ SQUEEZE (Bant: %{bb_genislik})"
-                    aksiyon = "🟡 SIKIŞMA"
-                    kategori = "SQUEEZE"
+        # Fonlama Oranı (Funding Rate) Bilgisi
+        funding_rate = None
+        if is_futures and 'info' in t_info:
+          funding_rate = float(
+              t_info['info'].get('fundingRate', 0) or 0
+          ) * 100  # % cinsinden
 
-                # 2. Long Sinyalleri
-                if (hacim_orani >= hacim_carpani) and (son_kapanis >= gecmis_en_yuksek) and (45 <= son_rsi <= 75):
-                    sinyal_adi = "🚀 DİRENÇ KIRILIMI (PUMP)"
-                    aksiyon = "🟢 LONG" if is_futures else "🟢 GÜÇLÜ AL"
-                    kategori = "LONG"
+        sinyal_adi = None
+        aksiyon = None
+        kategori = None
 
-                elif (hacim_orani >= hacim_carpani) and (son_rsi <= 32) and (mum_degisimi > 0):
-                    sinyal_adi = "🩸 DİP DÖNÜŞ TEPKİSİ"
-                    aksiyon = "🟢 LONG" if is_futures else "🟢 ALIM BÖLGESİ"
-                    kategori = "LONG"
+        # 1. 💥 LİKİDASYON SQUEEZE ALGORİTMASI
+        if (
+            funding_rate is not None
+            and funding_rate <= fonlama_esigi
+            and hacim_orani >= 1.5
+        ):
+          sinyal_adi = (
+              f'💥 SHORT LİKİDASYON SQUEEZE (Fonlama: %{round(funding_rate, 4)})'
+          )
+          aksiyon = '🟢 GÜÇLÜ LONG (SQUEEZE)'
+          kategori = 'LIQ_LONG'
 
-                # 3. Short Sinyalleri
-                elif (hacim_orani >= hacim_carpani) and (son_rsi >= 75) and (mum_degisimi < 0):
-                    sinyal_adi = "🪤 BOĞA TUZAĞI (TEPEDEN RET)"
-                    aksiyon = "🔴 SHORT" if is_futures else "🔴 DİKKAT / SAT"
-                    kategori = "SHORT"
+        elif (
+            funding_rate is not None
+            and funding_rate >= 0.08
+            and hacim_orani >= 1.5
+            and mum_degisimi < 0
+        ):
+          sinyal_adi = (
+              f'💥 LONG LİKİDASYON DÖKÜMÜ (Fonlama: %{round(funding_rate, 4)})'
+          )
+          aksiyon = '🔴 SHORT (TASFİYE)'
+          kategori = 'LIQ_SHORT'
 
-                # 4. Anormal Hacim Patlaması
-                elif hacim_orani >= (hacim_carpani * 1.5):
-                    if mum_degisimi >= 0:
-                        sinyal_adi = "⚡ ANORMAL HACİMLİ YÜKSELİŞ"
-                        aksiyon = "🟢 LONG" if is_futures else "🟢 ALIM"
-                        kategori = "LONG"
-                    else:
-                        sinyal_adi = "⚡ ANORMAL HACİMLİ DÜŞÜŞ"
-                        aksiyon = "🔴 SHORT" if is_futures else "🔴 SATIŞ"
-                        kategori = "SHORT"
+        # 2. Teknik Sinyaller
+        elif (
+            (hacim_orani >= hacim_carpani)
+            and (son_kapanis >= gecmis_en_yuksek)
+            and (45 <= son_rsi <= 75)
+        ):
+          sinyal_adi = '🚀 DİRENÇ KIRILIMI (PUMP)'
+          aksiyon = '🟢 LONG'
+          kategori = 'LONG'
 
-                # Filtre Kontrolü
-                uygun = False
-                if sinyal_filtresi == "Tümü (Long + Short)" and kategori in ["LONG", "SHORT"]:
-                    uygun = True
-                elif sinyal_filtresi == "🟢 Sadece LONG" and kategori == "LONG":
-                    uygun = True
-                elif sinyal_filtresi == "🔴 Sadece SHORT" and kategori == "SHORT":
-                    uygun = True
-                elif sinyal_filtresi == "🟡 Sadece SQUEEZE (Sıkışma)" and kategori == "SQUEEZE":
-                    uygun = True
+        elif (
+            (hacim_orani >= hacim_carpani)
+            and (son_rsi <= 32)
+            and (mum_degisimi > 0)
+        ):
+          sinyal_adi = '🩸 DİP DÖNÜŞ TEPKİSİ'
+          aksiyon = '🟢 LONG'
+          kategori = 'LONG'
 
-                if uygun:
-                    temiz_parite = sembol.split(':')[0]
-                    mexc_kod = temiz_parite.replace('/', '_')
-                    
-                    if is_futures:
-                        mexc_link = f"https://www.mexc.com/tr-TR/futures/{mexc_kod}"
-                    else:
-                        mexc_link = f"https://www.mexc.com/tr-TR/exchange/{mexc_kod}"
-                    
-                    sinyal_id = f"{temiz_parite}_{sinyal_adi}_{zaman_dilimi}"
-                    
-                    # Telegram'a Gönderim (Fotoğraflı & İlgili Konuya)
-                    if telegram_aktif and sinyal_id not in st.session_state.gonderilen_sinyaller:
-                        tg_caption = (
-                            f"🚨 <b>MEXC {piyasa_turu.upper()} SİNYALİ</b>\n\n"
-                            f"📌 <b>Parite:</b> {temiz_parite}\n"
-                            f"🎯 <b>Yön:</b> {aksiyon}\n"
-                            f"⚡ <b>Sinyal:</b> {sinyal_adi}\n"
-                            f"⏱ <b>Zaman Dilimi:</b> {zaman_dilimi}\n"
-                            f"💰 <b>Fiyat:</b> {son_kapanis} $\n"
-                            f"📊 <b>Hacim Katı:</b> {round(hacim_orani, 1)}x\n"
-                            f"📈 <b>RSI (14):</b> {son_rsi}\n\n"
-                            f"🔗 <a href='{mexc_link}'>MEXC Grafiği Aç ↗</a>"
-                        )
-                        try:
-                            foto_buffer = grafik_olustur(df, temiz_parite, zaman_dilimi)
-                            telegram_fotograf_gonder(foto_buffer, tg_caption, kategori)
-                        except Exception:
-                            pass
+        elif (
+            (hacim_orani >= hacim_carpani)
+            and (son_rsi >= 75)
+            and (mum_degisimi < 0)
+        ):
+          sinyal_adi = '🪤 BOĞA TUZAĞI (TEPEDEN RET)'
+          aksiyon = '🔴 SHORT'
+          kategori = 'SHORT'
 
-                        st.session_state.gonderilen_sinyaller.add(sinyal_id)
+        elif bb_genislik <= 3.5:
+          sinyal_adi = f'🗜️ SQUEEZE (Bant: %{bb_genislik})'
+          aksiyon = '🟡 SIKIŞMA'
+          kategori = 'SQUEEZE'
 
-                    sinyaller.append({
-                        "Yön": aksiyon,
-                        "Sinyal Detayı": sinyal_adi,
-                        "Sembol": temiz_parite,
-                        "Fiyat ($)": son_kapanis,
-                        "Hacim Katı": f"{round(hacim_orani, 1)}x",
-                        "Mum %": f"%{round(mum_degisimi, 2)}",
-                        "Bant Genişliği": f"%{bb_genislik}",
-                        "RSI": son_rsi,
-                        "Grafik": mexc_link
-                    })
-        except Exception:
-            pass
+        # Filtreleme
+        uygun = False
+        if sinyal_filtresi == 'Tümü' and kategori is not None:
+          uygun = True
+        elif (
+            sinyal_filtresi == '💥 Sadece LİKİDASYON Squeeze (Özel)'
+            and kategori in ['LIQ_LONG', 'LIQ_SHORT']
+        ):
+          uygun = True
+        elif sinyal_filtresi == '🟢 Sadece LONG' and kategori in [
+            'LONG',
+            'LIQ_LONG',
+        ]:
+          uygun = True
+        elif sinyal_filtresi == '🔴 Sadece SHORT' and kategori in [
+            'SHORT',
+            'LIQ_SHORT',
+        ]:
+          uygun = True
+        elif (
+            sinyal_filtresi == '🟡 Sadece SQUEEZE (Bant Sıkışması)'
+            and kategori == 'SQUEEZE'
+        ):
+          uygun = True
 
-    return pd.DataFrame(sinyaller)
+        if uygun:
+          temiz_parite = sembol.split(':')[0]
+          mexc_kod = temiz_parite.replace('/', '_')
 
-# --- BUTON & CANLI ÇALIŞTIRMA ---
-manuel_tara = st.button("🔍 Şimdi Tara", type="primary", use_container_width=True)
+          if is_futures:
+            mexc_link = f'https://www.mexc.com/tr-TR/futures/{mexc_kod}'
+          else:
+            mexc_link = f'https://www.mexc.com/tr-TR/exchange/{mexc_kod}'
+
+          sinyal_id = f'{temiz_parite}_{sinyal_adi}_{zaman_dilimi}'
+
+          # Telegram Gönderimi
+          if (
+              telegram_aktif
+              and sinyal_id not in st.session_state.gonderilen_sinyaller
+          ):
+            fonlama_metni = (
+                f'\n💸 <b>Fonlama:</b> %{round(funding_rate, 4)}'
+                if funding_rate is not None
+                else ''
+            )
+            tg_caption = (
+                f'🚨 <b>MEXC {piyasa_turu.upper()} SİNYALİ</b>\n\n'
+                f'📌 <b>Parite:</b> {temiz_parite}\n'
+                f'🎯 <b>Yön:</b> {aksiyon}\n'
+                f'⚡ <b>Sinyal:</b> {sinyal_adi}\n'
+                f'⏱ <b>Zaman Dilimi:</b> {zaman_dilimi}\n'
+                f'💰 <b>Fiyat:</b> {son_kapanis} $\n'
+                f'📊 <b>Hacim Katı:</b> {round(hacim_orani, 1)}x'
+                f'{fonlama_metni}\n'
+                f'📈 <b>RSI (14):</b> {son_rsi}\n\n'
+                f"🔗 <a href='{mexc_link}'>MEXC Grafiği Aç ↗</a>"
+            )
+            try:
+              foto_buffer = grafik_olustur(df, temiz_parite, zaman_dilimi)
+              telegram_fotograf_gonder(foto_buffer, tg_caption, kategori)
+            except Exception:
+              pass
+
+            st.session_state.gonderilen_sinyaller.add(sinyal_id)
+
+          sinyaller.append({
+              'Yön': aksiyon,
+              'Sinyal Detayı': sinyal_adi,
+              'Sembol': temiz_parite,
+              'Fiyat ($)': son_kapanis,
+              'Fonlama (%)': (
+                  f'%{round(funding_rate, 4)}'
+                  if funding_rate is not None
+                  else '-'
+              ),
+              'Hacim Katı': f'{round(hacim_orani, 1)}x',
+              'Mum %': f'%{round(mum_degisimi, 2)}',
+              'RSI': son_rsi,
+              'Grafik': mexc_link,
+          })
+    except Exception:
+      pass
+
+  return pd.DataFrame(sinyaller)
+
+
+# --- ÇALIŞTIRMA ---
+manuel_tara = st.button('🔍 Şimdi Tara', type='primary', use_container_width=True)
 
 if oto_yenileme or manuel_tara:
-    with st.spinner("Piyasa taranıyor ve sinyaller Telegram'a aktarılıyor..."):
-        df_sonuc = piyasa_tara()
-        
-    if not df_sonuc.empty:
-        st.success(f"Tespit Edilen Fırsatlar ({pd.Timestamp.now().strftime('%H:%M:%S')}):")
-        st.dataframe(
-            df_sonuc,
-            column_config={
-                "Grafik": st.column_config.LinkColumn(
-                    "MEXC Link",
-                    display_text="Grafiği Aç ↗"
-                )
-            },
-            use_container_width=True
-        )
-    else:
-        st.info(f"Seçilen filtreye uygun sonuç bulunamadı ({pd.Timestamp.now().strftime('%H:%M:%S')}).")
+  with st.spinner(
+      'Likidasyon ve hacim hareketleri taranıyor, Telegram\'a aktarılıyor...'
+  ):
+    df_sonuc = piyasa_tara()
+
+  if not df_sonuc.empty:
+    st.success(
+        f'Tespit Edilen Fırsatlar ({pd.Timestamp.now().strftime("%H:%M:%S")}):'
+    )
+    st.dataframe(
+        df_sonuc,
+        column_config={
+            'Grafik': st.column_config.LinkColumn(
+                'MEXC Link', display_text='Grafiği Aç ↗'
+            )
+        },
+        use_container_width=True,
+    )
+  else:
+    st.info(
+        'Seçilen filtreye uygun sonuç bulunamadı'
+        f' ({pd.Timestamp.now().strftime("%H:%M:%S")}).'
+    )
