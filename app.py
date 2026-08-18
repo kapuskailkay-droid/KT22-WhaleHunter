@@ -4,19 +4,23 @@ import pandas as pd
 import numpy as np
 
 # Sayfa Yapılandırması
-st.set_page_config(page_title="MEXC Futures Sinyal Radarı", layout="wide")
+st.set_page_config(page_title="MEXC Akıllı Sinyal Radarı", layout="wide")
 
-st.title("⚡ MEXC Vadeli (Futures) Algoritmik Sinyal Radarı")
-st.caption("Piyasadaki likidite patlamalarını, kırılımları ve tepe/dip tuzaklarını tarar.")
+# --- YAN MENÜ (FİLTRELER & AYARLAR) ---
+st.sidebar.header("🎯 Strateji & Piyasa Ayarları")
 
-# --- YAN MENÜ PARAMETRELERİ ---
-st.sidebar.header("🎯 Strateji & Filtre Ayarları")
+piyasa_turu = st.sidebar.radio(
+    "Piyasa Türü",
+    options=["Vadeli (Futures)", "Spot"],
+    index=0,
+    help="Taramak istediğiniz piyasayı seçin."
+)
 
 zaman_dilimi = st.sidebar.selectbox(
     "Zaman Dilimi (Timeframe)",
     options=["5m", "15m", "1h", "4h", "1d", "1w"],
     index=1,
-    help="Scalp için 5m/15m, swing için 1h/4h, ana trend ve büyük dalgalar için 1d/1w seçin."
+    help="Scalp için 5m/15m, trend için 1h/4h, büyük dalgalar için 1d/1w seçin."
 )
 
 hacim_carpani = st.sidebar.slider(
@@ -35,7 +39,14 @@ coin_adedi = st.sidebar.select_slider(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.warning("⚠️ **Risk Uyarısı:** Vadeli işlemlerde yüksek kaldıraçtan kaçının ve her zaman Stop-Loss kullanın.")
+if piyasa_turu == "Vadeli (Futures)":
+    st.sidebar.warning("⚠️ **Risk Uyarısı:** Vadeli işlemlerde yüksek kaldıraçtan kaçının ve mutlaka Stop-Loss kullanın.")
+else:
+    st.sidebar.info("💡 **Spot Bilgi:** Spot piyasada düşüşler yerine ağırlıklı olarak yeşil (Long/Alım) sinyallerine odaklanın.")
+
+# Sayfa Başlığı
+st.title(f"⚡ MEXC {piyasa_turu} Algoritmik Sinyal Radarı")
+st.caption(f"{piyasa_turu} piyasasında hacim patlamalarını, kırılımları ve tepe/dip dönüşlerini tarar.")
 
 # --- RSI HESAPLAMA ---
 def hesapla_rsi(seri, periyot=14):
@@ -48,16 +59,24 @@ def hesapla_rsi(seri, periyot=14):
     return 100 - (100 / (1 + rs))
 
 # --- TARAMA MOTORU ---
-def futures_tara():
-    mexc = ccxt.mexc()
+def piyasa_tara():
+    is_futures = (piyasa_turu == "Vadeli (Futures)")
+    
+    # Piyasa türüne göre CCXT yapılandırması
+    if is_futures:
+        mexc = ccxt.mexc({'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
+    else:
+        mexc = ccxt.mexc({'options': {'defaultType': 'spot'}, 'enableRateLimit': True})
+        
     try:
         tickers = mexc.fetch_tickers()
     except Exception as e:
         st.error(f"MEXC Veri Hatası: {e}")
         return pd.DataFrame()
 
-    usdt_pariteler = [s for s in tickers.keys() if '/USDT' in s and ':' not in s]
-    usdt_pariteler.sort(key=lambda x: tickers[x].get('quoteVolume', 0), reverse=True)
+    # USDT paritelerini filtreleme ve sıralama
+    usdt_pariteler = [s for s in tickers.keys() if '/USDT' in s]
+    usdt_pariteler.sort(key=lambda x: tickers[x].get('quoteVolume', 0) or 0, reverse=True)
     hedef_listesi = usdt_pariteler[:coin_adedi]
 
     sinyaller = []
@@ -66,7 +85,6 @@ def futures_tara():
 
     for i, sembol in enumerate(hedef_listesi):
         try:
-            # Günlük ve haftalık veriler için 35 mum çekiyoruz
             mumlar = mexc.fetch_ohlcv(sembol, timeframe=zaman_dilimi, limit=35)
             if len(mumlar) >= 20:
                 df = pd.DataFrame(mumlar, columns=['Zaman', 'Acilis', 'Yuksek', 'Dusuk', 'Kapanis', 'Hacim'])
@@ -91,34 +109,45 @@ def futures_tara():
                 sinyal_adi = None
                 aksiyon = None
 
-                # 1. Strateji: Balina Kırılımı (Hacimli Direnç Kırılımı)
+                # 1. Strateji: Direnç Kırılımı (Pump)
                 if (hacim_orani >= hacim_carpani) and (son_kapanis >= gecmis_en_yuksek) and (45 <= son_rsi <= 75):
                     sinyal_adi = "🚀 DİRENÇ KIRILIMI (PUMP)"
-                    aksiyon = "🟢 LONG"
+                    aksiyon = "🟢 LONG" if is_futures else "🟢 GÜÇLÜ AL"
 
-                # 2. Strateji: Dip Avcısı (Oversold Hacimli Tepki)
+                # 2. Strateji: Dip Avcısı (Oversold Tepki)
                 elif (hacim_orani >= hacim_carpani) and (son_rsi <= 32) and (mum_degisimi > 0):
                     sinyal_adi = "🩸 DİP DÖNÜŞ TEPKİSİ"
-                    aksiyon = "🟢 LONG"
+                    aksiyon = "🟢 LONG" if is_futures else "🟢 ALIM BÖLGESİ"
 
-                # 3. Strateji: Tepe Boğa Tuzağı (Short Fırsatı)
+                # 3. Strateji: Tepe Boğa Tuzağı (Reversal)
                 elif (hacim_orani >= hacim_carpani) and (son_rsi >= 75) and (mum_degisimi < 0):
                     sinyal_adi = "🪤 BOĞA TUZAĞI (TEPEDEN RET)"
-                    aksiyon = "🔴 SHORT"
+                    aksiyon = "🔴 SHORT" if is_futures else "🔴 DİKKAT / SAT"
 
                 # 4. Genel Anormal Hacim Hareketi
                 elif hacim_orani >= (hacim_carpani * 1.5):
                     sinyal_adi = "⚡ ANORMAL HACİM HAREKETİ"
-                    aksiyon = "🟢 LONG" if mum_degisimi >= 0 else "🔴 SHORT"
+                    if is_futures:
+                        aksiyon = "🟢 LONG" if mum_degisimi >= 0 else "🔴 SHORT"
+                    else:
+                        aksiyon = "🟢 HACİMLİ YÜKSELİŞ" if mum_degisimi >= 0 else "🔴 HACİMLİ SATIŞ"
 
                 if sinyal_adi:
-                    saf_sembol = sembol.replace('/', '_')
-                    mexc_link = f"https://www.mexc.com/tr-TR/futures/{saf_sembol}"
+                    temiz_parite = sembol.split(':')[0]
+                    mexc_kod = temiz_parite.replace('/', '_')
+                    
+                    # Doğru URL formatı (Vadeli vs Spot)
+                    if is_futures:
+                        mexc_link = f"https://www.mexc.com/tr-TR/futures/{mexc_kod}"
+                        link_baslik = "MEXC Vadeli"
+                    else:
+                        mexc_link = f"https://www.mexc.com/tr-TR/exchange/{mexc_kod}"
+                        link_baslik = "MEXC Spot"
                     
                     sinyaller.append({
                         "Yön": aksiyon,
                         "Sinyal Türü": sinyal_adi,
-                        "Sembol": sembol,
+                        "Sembol": temiz_parite,
                         "Fiyat ($)": son_kapanis,
                         "Hacim Katı": f"{round(hacim_orani, 1)}x",
                         "Mum %": f"%{round(mum_degisimi, 2)}",
@@ -129,27 +158,28 @@ def futures_tara():
             pass
 
         progress_bar.progress((i + 1) / len(hedef_listesi))
-        durum_metni.text(f"Piyasa taranıyor: {sembol} ({i+1}/{len(hedef_listesi)})")
+        durum_metni.text(f"{piyasa_turu} taranıyor: {sembol} ({i+1}/{len(hedef_listesi)})")
 
     progress_bar.empty()
     durum_metni.empty()
     return pd.DataFrame(sinyaller)
 
-# --- EKRANA BASMA ---
-if st.button("🔥 Vadeli Sinyalleri Tara", type="primary", use_container_width=True):
-    df_sonuc = futures_tara()
+# --- ÇALIŞTIRMA BUTONU ---
+buton_metni = f"🔥 {piyasa_turu} Sinyallerini Tara"
+if st.button(buton_metni, type="primary", use_container_width=True):
+    df_sonuc = piyasa_tara()
     
     if not df_sonuc.empty:
-        st.success(f"Piyasada {len(df_sonuc)} adet vadeli işlem fırsatı tespit edildi!")
+        st.success(f"{piyasa_turu} piyasasında {len(df_sonuc)} adet işlem fırsatı tespit edildi!")
         st.dataframe(
             df_sonuc,
             column_config={
                 "Grafik": st.column_config.LinkColumn(
-                    "MEXC Futures",
+                    "MEXC Link",
                     display_text="Grafiği Aç ↗"
                 )
             },
             use_container_width=True
         )
     else:
-        st.info("Şu anda seçtiğiniz filtrelere uyan net bir sinyal bulunamadı. Hacim çarpanını düşürerek veya farklı bir zaman dilimi seçerek tekrar deneyebilirsiniz.")
+        st.info(f"Şu anda {piyasa_turu} piyasasında seçtiğiniz kriterlere uyan net bir sinyal bulunamadı. Hacim çarpanını esneterek tekrar deneyebilirsiniz.")
