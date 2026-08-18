@@ -3,10 +3,14 @@ import ccxt
 import pandas as pd
 import numpy as np
 import requests
+import io
+import matplotlib
+matplotlib.use('Agg')
+import mplfinance as mpf
 from streamlit_autorefresh import st_autorefresh
 
 # Sayfa Yapılandırması
-st.set_page_config(page_title="MEXC Akıllı Sinyal Radarı", layout="wide")
+st.set_page_config(page_title="MEXC Görselli Sinyal Radarı", layout="wide")
 
 # Sinyal Hafızası (Spam engellemek için)
 if 'gonderilen_sinyaller' not in st.session_state:
@@ -20,9 +24,9 @@ chat_id = st.sidebar.text_input("Telegram Chat ID", value="-1004434260285")
 
 col_tg1, col_tg2 = st.sidebar.columns(2)
 with col_tg1:
-    long_thread_id = st.text_input("🟢 LONG Topic ID", value="73", help="Long sinyallerinin gideceği sekme ID")
+    long_thread_id = st.text_input("🟢 LONG Topic ID", value="73", help="Long sekme ID")
 with col_tg2:
-    short_thread_id = st.text_input("🔴 SHORT Topic ID", placeholder="Örn: 74", help="Short sinyallerinin gideceği sekme ID")
+    short_thread_id = st.text_input("🔴 SHORT Topic ID", placeholder="Örn: 74", help="Short sekme ID")
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Canlı Yayın & Tarama")
@@ -82,20 +86,41 @@ coin_adedi = st.sidebar.select_slider(
     value=100
 )
 
-st.title(f"⚡ MEXC {piyasa_turu} Otomatik & Çift Kanallı Sinyal Radarı")
+st.title(f"⚡ MEXC {piyasa_turu} Görsel Destekli Sinyal Radarı")
 
-# --- TELEGRAM MESAJ GÖNDERME FONKSİYONU ---
-def telegram_mesaj_gonder(mesaj, kategori):
+# --- GRAFİK OLUŞTURMA FONKSİYONU ---
+def grafik_olustur(df_mum, sembol, zaman_dilimi):
+    df_grafik = df_mum.copy()
+    df_grafik['Zaman'] = pd.to_datetime(df_grafik['Zaman'], unit='ms')
+    df_grafik.set_index('Zaman', inplace=True)
+    df_grafik.rename(columns={
+        'Acilis': 'Open',
+        'Yuksek': 'High',
+        'Dusuk': 'Low',
+        'Kapanis': 'Close',
+        'Hacim': 'Volume'
+    }, inplace=True)
+
+    mc = mpf.make_marketcolors(up='#00ff88', down='#ff3366', inherit=True)
+    s = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc, gridcolor='#2b2b2b')
+
+    buf = io.BytesIO()
+    mpf.plot(
+        df_grafik.tail(30),
+        type='candle',
+        volume=True,
+        style=s,
+        title=f"{sembol} ({zaman_dilimi})",
+        savefig=dict(fname=buf, dpi=120, bbox_inches='tight')
+    )
+    buf.seek(0)
+    return buf
+
+# --- TELEGRAM FOTOĞRAFLI MESAJ FONKSİYONU ---
+def telegram_fotograf_gonder(foto_buf, caption_metni, kategori):
     if telegram_aktif and bot_token and chat_id:
-        url = f"https://api.telegram.org/bot{bot_token.strip()}/sendMessage"
-        payload = {
-            "chat_id": chat_id.strip(),
-            "text": mesaj,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": False
-        }
+        url = f"https://api.telegram.org/bot{bot_token.strip()}/sendPhoto"
         
-        # Yöne göre ilgili Topic ID'sini seç
         hedef_topic = None
         if kategori == "LONG" and long_thread_id and str(long_thread_id).strip():
             hedef_topic = long_thread_id.strip()
@@ -103,15 +128,22 @@ def telegram_mesaj_gonder(mesaj, kategori):
             hedef_topic = short_thread_id.strip()
         elif kategori == "SQUEEZE" and long_thread_id and str(long_thread_id).strip():
             hedef_topic = long_thread_id.strip()
-            
+
+        data = {
+            "chat_id": chat_id.strip(),
+            "caption": caption_metni,
+            "parse_mode": "HTML"
+        }
         if hedef_topic:
             try:
-                payload["message_thread_id"] = int(hedef_topic)
+                data["message_thread_id"] = int(hedef_topic)
             except ValueError:
                 pass
-                
+
+        files = {"photo": ("chart.png", foto_buf, "image/png")}
+
         try:
-            requests.post(url, data=payload, timeout=8)
+            requests.post(url, data=data, files=files, timeout=12)
         except Exception:
             pass
 
@@ -200,7 +232,7 @@ def piyasa_tara():
                     aksiyon = "🔴 SHORT" if is_futures else "🔴 DİKKAT / SAT"
                     kategori = "SHORT"
 
-                # 4. Hacim Patlamaları
+                # 4. Anormal Hacim
                 elif hacim_orani >= (hacim_carpani * 1.5):
                     if mum_degisimi >= 0:
                         sinyal_adi = "⚡ ANORMAL HACİMLİ YÜKSELİŞ"
@@ -233,8 +265,9 @@ def piyasa_tara():
                     
                     sinyal_id = f"{temiz_parite}_{sinyal_adi}_{zaman_dilimi}"
                     
+                    # Telegram Fotoğraflı Gönderim
                     if telegram_aktif and sinyal_id not in st.session_state.gonderilen_sinyaller:
-                        tg_mesaj = (
+                        tg_caption = (
                             f"🚨 <b>MEXC {piyasa_turu.upper()} SİNYALİ</b>\n\n"
                             f"📌 <b>Parite:</b> {temiz_parite}\n"
                             f"🎯 <b>Yön:</b> {aksiyon}\n"
@@ -243,9 +276,14 @@ def piyasa_tara():
                             f"💰 <b>Fiyat:</b> {son_kapanis} $\n"
                             f"📊 <b>Hacim Katı:</b> {round(hacim_orani, 1)}x\n"
                             f"📈 <b>RSI (14):</b> {son_rsi}\n\n"
-                            f"🔗 <a href='{mexc_link}'>MEXC Grafiği Aç</a>"
+                            f"🔗 <a href='{mexc_link}'>MEXC Grafiği Aç ↗</a>"
                         )
-                        telegram_mesaj_gonder(tg_mesaj, kategori)
+                        try:
+                            foto_buffer = grafik_olustur(df, temiz_parite, zaman_dilimi)
+                            telegram_fotograf_gonder(foto_buffer, tg_caption, kategori)
+                        except Exception:
+                            pass
+                            
                         st.session_state.gonderilen_sinyaller.add(sinyal_id)
 
                     sinyaller.append({
@@ -268,7 +306,7 @@ def piyasa_tara():
 manuel_tara = st.button("🔍 Şimdi Tara", type="primary", use_container_width=True)
 
 if oto_yenileme or manuel_tara:
-    with st.spinner("Piyasa taranıyor..."):
+    with st.spinner("Piyasa taranıyor ve grafikler hazırlanıyor..."):
         df_sonuc = piyasa_tara()
         
     if not df_sonuc.empty:
