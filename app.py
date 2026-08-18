@@ -13,14 +13,14 @@ matplotlib.use('Agg')
 
 # --- SAYFA YAPILANDIRMASI ---
 st.set_page_config(
-    page_title='MEXC VIP Çok Kanallı Algoritmik Radar', layout='wide'
+    page_title='MEXC VIP Algoritmik Sinyal Radarı', layout='wide'
 )
 
 if 'gonderilen_sinyaller' not in st.session_state:
   st.session_state.gonderilen_sinyaller = set()
 
-# --- YAN PANEL: TELEGRAM TOPIC AYARLARI ---
-st.sidebar.header('📱 Telegram Konu (Topic) ID Ayarları')
+# --- YAN PANEL: TELEGRAM AYARLARI (TEK KANAL) ---
+st.sidebar.header('📱 Telegram Bildirim Ayarları')
 telegram_aktif = st.sidebar.checkbox('🚀 Telegram\'a Sinyal Gönder', value=True)
 bot_token = st.sidebar.text_input(
     'Telegram Bot Token',
@@ -29,13 +29,14 @@ bot_token = st.sidebar.text_input(
 )
 chat_id = st.sidebar.text_input('Telegram Chat ID', value='-1004434260285')
 
-col_t1, col_t2 = st.sidebar.columns(2)
-with col_t1:
-  liq_thread_id = st.text_input('💥 Likidasyon Sekme ID', value='363')
-  long_thread_id = st.text_input('🟢 Long / Pump Sekme ID', value='362')
-with col_t2:
-  short_thread_id = st.text_input('🔴 Short Sekme ID', value='360')
-  div_thread_id = st.text_input('📈 Uyumsuzluk (Div) ID', value='364')
+topic_id = st.sidebar.text_input(
+    'Telegram Konu (Topic) ID',
+    value='73',
+    help=(
+        'Tüm sinyallerin toplanacağı tek konunun ID numarası (Örn: 73 veya'
+        ' 364). Ana grup için boş bırakabilirsiniz.'
+    ),
+)
 
 st.sidebar.markdown('---')
 st.sidebar.header('⚙️ Canlı Yayın & Tarama')
@@ -69,7 +70,7 @@ hacim_carpani = st.sidebar.slider(
     'Minimum Hacim Artış Katı',
     min_value=1.1,
     max_value=3.5,
-    value=1.4,
+    value=1.3,
     step=0.1,
 )
 
@@ -77,7 +78,7 @@ fonlama_esigi = st.sidebar.slider(
     'Eksi Fonlama Eşiği (%)',
     min_value=-0.15,
     max_value=-0.005,
-    value=-0.020,
+    value=-0.015,
     step=0.005,
     format='%.3f',
 )
@@ -88,7 +89,7 @@ coin_adedi = st.sidebar.select_slider(
     value=100,
 )
 
-st.title(f'⚡ MEXC {piyasa_turu} Çoklu Strateji & Fırsat Avcısı')
+st.title(f'⚡ MEXC {piyasa_turu} VIP Algoritmik Sinyal Radarı')
 
 
 # --- GRAFİK OLUŞTURMA ---
@@ -125,25 +126,15 @@ def grafik_olustur(df_mum, sembol, zaman_dilimi):
   return buf
 
 
-# --- TELEGRAM MESAJ GÖNDERME ---
-def telegram_fotograf_gonder(foto_buf, caption_metni, kanal_tipi):
+# --- TELEGRAM MESAJ GÖNDERME (TEK MERKEZE) ---
+def telegram_fotograf_gonder(foto_buf, caption_metni):
   if telegram_aktif and bot_token and chat_id:
     url = f'https://api.telegram.org/bot{bot_token.strip()}/sendPhoto'
 
-    hedef_topic = None
-    if kanal_tipi == 'LONG' and long_thread_id:
-      hedef_topic = str(long_thread_id).strip()
-    elif kanal_tipi == 'SHORT' and short_thread_id:
-      hedef_topic = str(short_thread_id).strip()
-    elif kanal_tipi == 'LIQUIDATION' and liq_thread_id:
-      hedef_topic = str(liq_thread_id).strip()
-    elif kanal_tipi == 'DIVERGENCE' and div_thread_id:
-      hedef_topic = str(div_thread_id).strip()
-
     params = {}
-    if hedef_topic and hedef_topic != '':
+    if topic_id and str(topic_id).strip() != '':
       try:
-        params['message_thread_id'] = int(hedef_topic)
+        params['message_thread_id'] = int(str(topic_id).strip())
       except ValueError:
         pass
 
@@ -260,9 +251,8 @@ def piyasa_tara():
 
         sinyal_adi = None
         aksiyon = None
-        kanal_tipi = None
 
-        # 1. 💥 LİKİDASYON SQUEEZE (Öncelikli) -> 363 Sekmesine
+        # 1. 💥 LİKİDASYON SQUEEZE
         if (
             funding_rate is not None
             and funding_rate <= fonlama_esigi
@@ -272,7 +262,6 @@ def piyasa_tara():
               f'💥 SHORT SQUEEZE ADAYI (Fonlama: %{round(funding_rate, 4)})'
           )
           aksiyon = '🟢 GÜÇLÜ LONG'
-          kanal_tipi = 'LIQUIDATION'
 
         elif (
             funding_rate is not None
@@ -284,9 +273,8 @@ def piyasa_tara():
               f'💥 LONG TASFİYE BASKISI (Fonlama: %{round(funding_rate, 4)})'
           )
           aksiyon = '🔴 GÜÇLÜ SHORT'
-          kanal_tipi = 'LIQUIDATION'
 
-        # 2. 🟢 LONG PUMP & KIRILIM -> 362 Sekmesine
+        # 2. 🟢 LONG PUMP & KIRILIM
         elif (
             (hacim_orani >= hacim_carpani)
             and (son_kapanis >= gecmis_en_yuksek * 0.998)
@@ -294,7 +282,6 @@ def piyasa_tara():
         ):
           sinyal_adi = '🚀 DİRENÇ KIRILIMI / PUMP'
           aksiyon = '🟢 LONG'
-          kanal_tipi = 'LONG'
 
         elif (
             (df['EMA20'].iloc[-1] >= df['EMA50'].iloc[-1])
@@ -304,9 +291,8 @@ def piyasa_tara():
         ):
           sinyal_adi = '⚡ HACİMLİ BOĞA TRENDİ'
           aksiyon = '🟢 LONG'
-          kanal_tipi = 'LONG'
 
-        # 3. 🔴 SHORT DUMP & DÜŞÜŞ -> 360 Sekmesine
+        # 3. 🔴 SHORT DUMP & DÜŞÜŞ
         elif (
             (hacim_orani >= hacim_carpani)
             and (son_kapanis <= gecmis_en_dusuk * 1.002)
@@ -314,7 +300,6 @@ def piyasa_tara():
         ):
           sinyal_adi = '🩸 DESTEK KIRILIMI / DUMP'
           aksiyon = '🔴 SHORT'
-          kanal_tipi = 'SHORT'
 
         elif (
             (df['EMA20'].iloc[-1] <= df['EMA50'].iloc[-1])
@@ -324,9 +309,8 @@ def piyasa_tara():
         ):
           sinyal_adi = '⚡ HACİMLİ AYI BASKISI'
           aksiyon = '🔴 SHORT'
-          kanal_tipi = 'SHORT'
 
-        # 4. 📈 RSI DIVERGENCE (Gerçek Uyumsuzluk) -> 364 Sekmesine
+        # 4. 📈 RSI DIVERGENCE (Gerçek Uyumsuzluk)
         elif (
             (son_kapanis < gecmis_en_dusuk)
             and (son_rsi > min_gecmis_rsi + 5)
@@ -334,7 +318,6 @@ def piyasa_tara():
         ):
           sinyal_adi = '📈 POZİTİF UYUMSUZLUK (DİP DÖNÜŞ)'
           aksiyon = '🟢 LONG'
-          kanal_tipi = 'DIVERGENCE'
 
         elif (
             (son_kapanis > gecmis_en_yuksek)
@@ -343,9 +326,8 @@ def piyasa_tara():
         ):
           sinyal_adi = '📉 NEGATİF UYUMSUZLUK (TEPE DÖNÜŞ)'
           aksiyon = '🔴 SHORT'
-          kanal_tipi = 'DIVERGENCE'
 
-        if kanal_tipi is not None:
+        if aksiyon is not None:
           temiz_parite = sembol.split(':')[0]
           mexc_kod = temiz_parite.replace('/', '_')
 
@@ -386,14 +368,13 @@ def piyasa_tara():
             )
             try:
               foto_buffer = grafik_olustur(df, temiz_parite, zaman_dilimi)
-              telegram_fotograf_gonder(foto_buffer, tg_caption, kanal_tipi)
+              telegram_fotograf_gonder(foto_buffer, tg_caption)
             except Exception:
               pass
 
             st.session_state.gonderilen_sinyaller.add(sinyal_id)
 
           sinyaller.append({
-              'Kanal': kanal_tipi,
               'Yön': aksiyon,
               'Sinyal Detayı': sinyal_adi,
               'Sembol': temiz_parite,
@@ -414,7 +395,7 @@ def piyasa_tara():
 manuel_tara = st.button('🔍 Şimdi Tara', type='primary', use_container_width=True)
 
 if oto_yenileme or manuel_tara:
-  with st.spinner('Piyasa taranıyor ve ilgili kanallara ayrıştırılıyor...'):
+  with st.spinner('Tüm piyasa taranıyor ve sinyaller Telegram\'a aktarılıyor...'):
     df_sonuc = piyasa_tara()
 
   if not df_sonuc.empty:
