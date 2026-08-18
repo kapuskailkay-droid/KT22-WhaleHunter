@@ -4,32 +4,39 @@ import pandas as pd
 import numpy as np
 import requests
 import io
+import urllib.parse
 import matplotlib
 matplotlib.use('Agg')
 import mplfinance as mpf
 from streamlit_autorefresh import st_autorefresh
 
-# Sayfa Yapılandırması
-st.set_page_config(page_title="MEXC Görselli Sinyal Radarı", layout="wide")
+# --- SAYFA YAPILANDIRMASI ---
+st.set_page_config(page_title="MEXC Telegram & WhatsApp Sinyal Radarı", layout="wide")
 
-# Sinyal Hafızası (Spam engellemek için)
+# Tekrar eden sinyalleri engellemek için hafıza
 if 'gonderilen_sinyaller' not in st.session_state:
     st.session_state.gonderilen_sinyaller = set()
 
-# --- YAN MENÜ ---
-st.sidebar.header("📱 Telegram Oda & Bildirim Ayarları")
+# --- YAN PANEL: BİLDİRİM AYARLARI ---
+st.sidebar.header("📱 Telegram Bildirim Ayarları")
 telegram_aktif = st.sidebar.checkbox("🚀 Telegram'a Sinyal Gönder", value=True)
-bot_token = st.sidebar.text_input("Telegram Bot Token", type="password", placeholder="Bot token yapıştırın")
+bot_token = st.sidebar.text_input("Telegram Bot Token", type="password", placeholder="BotFather'dan aldığınız token")
 chat_id = st.sidebar.text_input("Telegram Chat ID", value="-1004434260285")
 
 col_tg1, col_tg2 = st.sidebar.columns(2)
 with col_tg1:
-    long_thread_id = st.text_input("🟢 LONG Topic ID", value="73", help="Long sekme ID")
+    long_thread_id = st.text_input("🟢 HUNTER / Long ID", value="73", help="HUNTER sekmenizin ID numarası")
 with col_tg2:
-    short_thread_id = st.text_input("🔴 SHORT Topic ID", placeholder="Örn: 74", help="Short sekme ID")
+    short_thread_id = st.text_input("🔴 Short Topic ID", value="73", help="Ayrı bir short sekmeniz varsa ID'sini girin, yoksa 73 bırakın")
 
 st.sidebar.markdown("---")
-st.sidebar.header("⚙️ Canlı Yayın & Tarama")
+st.sidebar.header("💬 Şahsi WhatsApp Bildirimi")
+whatsapp_aktif = st.sidebar.checkbox("🟢 WhatsApp'ıma Sinyal Gönder", value=False)
+wp_telefon = st.sidebar.text_input("Telefon No (Ülke Koduyla)", placeholder="Örn: 905xxxxxxxxx")
+wp_apikey = st.sidebar.text_input("CallMeBot API Key", type="password", placeholder="WhatsApp'tan gelen API Key")
+
+st.sidebar.markdown("---")
+st.sidebar.header("⚙️ Canlı Yayın & Tarama Ayarları")
 
 oto_yenileme = st.sidebar.checkbox("🔄 Otomatik Canlı Taramayı Aç", value=False)
 yenileme_araligi = st.sidebar.selectbox(
@@ -44,7 +51,7 @@ if oto_yenileme:
     st.sidebar.success(f"🟢 Canlı mod aktif: Her {yenileme_araligi} sn")
 
 st.sidebar.markdown("---")
-st.sidebar.header("🎯 Strateji & Yön Filtresi")
+st.sidebar.header("🎯 Strateji & Filtreler")
 
 piyasa_turu = st.sidebar.radio(
     "Piyasa Türü",
@@ -86,9 +93,10 @@ coin_adedi = st.sidebar.select_slider(
     value=100
 )
 
-st.title(f"⚡ MEXC {piyasa_turu} Görsel Destekli Sinyal Radarı")
+# Başlık
+st.title(f"⚡ MEXC {piyasa_turu} Otomatik & Çok Kanallı Sinyal Radarı")
 
-# --- GRAFİK OLUŞTURMA FONKSİYONU ---
+# --- GRAFİK OLUŞTURMA ---
 def grafik_olustur(df_mum, sembol, zaman_dilimi):
     df_grafik = df_mum.copy()
     df_grafik['Zaman'] = pd.to_datetime(df_grafik['Zaman'], unit='ms')
@@ -116,38 +124,50 @@ def grafik_olustur(df_mum, sembol, zaman_dilimi):
     buf.seek(0)
     return buf
 
-# --- TELEGRAM FOTOĞRAFLI MESAJ FONKSİYONU ---
+# --- TELEGRAM MESAJ GÖNDERME ---
 def telegram_fotograf_gonder(foto_buf, caption_metni, kategori):
     if telegram_aktif and bot_token and chat_id:
         url = f"https://api.telegram.org/bot{bot_token.strip()}/sendPhoto"
         
         hedef_topic = None
         if kategori == "LONG" and long_thread_id and str(long_thread_id).strip():
-            hedef_topic = long_thread_id.strip()
+            hedef_topic = str(long_thread_id).strip()
         elif kategori == "SHORT" and short_thread_id and str(short_thread_id).strip():
-            hedef_topic = short_thread_id.strip()
+            hedef_topic = str(short_thread_id).strip()
         elif kategori == "SQUEEZE" and long_thread_id and str(long_thread_id).strip():
-            hedef_topic = long_thread_id.strip()
+            hedef_topic = str(long_thread_id).strip()
+
+        params = {}
+        if hedef_topic:
+            try:
+                params["message_thread_id"] = int(hedef_topic)
+            except ValueError:
+                pass
 
         data = {
             "chat_id": chat_id.strip(),
             "caption": caption_metni,
             "parse_mode": "HTML"
         }
-        if hedef_topic:
-            try:
-                data["message_thread_id"] = int(hedef_topic)
-            except ValueError:
-                pass
-
         files = {"photo": ("chart.png", foto_buf, "image/png")}
 
         try:
-            requests.post(url, data=data, files=files, timeout=12)
+            requests.post(url, params=params, data=data, files=files, timeout=12)
         except Exception:
             pass
 
-# --- İNDİKATÖR HESAPLAMALARI ---
+# --- WHATSAPP MESAJ GÖNDERME ---
+def whatsapp_mesaj_gonder(mesaj_metni):
+    if whatsapp_aktif and wp_telefon and wp_apikey:
+        temiz_tel = wp_telefon.strip().replace("+", "").replace(" ", "")
+        kodlu_mesaj = urllib.parse.quote(mesaj_metni)
+        url = f"https://api.callmebot.com/whatsapp.php?phone={temiz_tel}&text={kodlu_mesaj}&apikey={wp_apikey.strip()}"
+        try:
+            requests.get(url, timeout=10)
+        except Exception:
+            pass
+
+# --- TEKNİK ANALİZ İNDİKATÖRLERİ ---
 def hesapla_rsi(seri, periyot=14):
     fark = seri.diff(1)
     kazanc = fark.clip(lower=0)
@@ -165,7 +185,7 @@ def hesapla_bollinger_genislik(df, periyot=20, std_kat=2):
     genislik = ((ust_bant - alt_bant) / sma) * 100
     return genislik.iloc[-1]
 
-# --- TARAMA MOTORU ---
+# --- PİYASA TARAMA MOTORU ---
 def piyasa_tara():
     is_futures = (piyasa_turu == "Vadeli (Futures)")
     
@@ -232,7 +252,7 @@ def piyasa_tara():
                     aksiyon = "🔴 SHORT" if is_futures else "🔴 DİKKAT / SAT"
                     kategori = "SHORT"
 
-                # 4. Anormal Hacim
+                # 4. Anormal Hacim Patlaması
                 elif hacim_orani >= (hacim_carpani * 1.5):
                     if mum_degisimi >= 0:
                         sinyal_adi = "⚡ ANORMAL HACİMLİ YÜKSELİŞ"
@@ -265,7 +285,7 @@ def piyasa_tara():
                     
                     sinyal_id = f"{temiz_parite}_{sinyal_adi}_{zaman_dilimi}"
                     
-                    # Telegram Fotoğraflı Gönderim
+                    # 1. Telegram'a Gönder (Fotoğraflı & HUNTER Konusuna)
                     if telegram_aktif and sinyal_id not in st.session_state.gonderilen_sinyaller:
                         tg_caption = (
                             f"🚨 <b>MEXC {piyasa_turu.upper()} SİNYALİ</b>\n\n"
@@ -283,8 +303,23 @@ def piyasa_tara():
                             telegram_fotograf_gonder(foto_buffer, tg_caption, kategori)
                         except Exception:
                             pass
-                            
-                        st.session_state.gonderilen_sinyaller.add(sinyal_id)
+
+                    # 2. WhatsApp'a Gönder (Şahsi Numaranıza Anlık Uyarı)
+                    if whatsapp_aktif and sinyal_id not in st.session_state.gonderilen_sinyaller:
+                        wp_metin = (
+                            f"🚨 *MEXC {piyasa_turu.upper()} SİNYALİ*\n\n"
+                            f"📌 *Parite:* {temiz_parite}\n"
+                            f"🎯 *Yön:* {aksiyon}\n"
+                            f"⚡ *Sinyal:* {sinyal_adi}\n"
+                            f"⏱ *Zaman:* {zaman_dilimi}\n"
+                            f"💰 *Fiyat:* {son_kapanis} $\n"
+                            f"📊 *Hacim:* {round(hacim_orani, 1)}x\n"
+                            f"📈 *RSI:* {son_rsi}\n\n"
+                            f"🔗 Grafik: {mexc_link}"
+                        )
+                        whatsapp_mesaj_gonder(wp_metin)
+
+                    st.session_state.gonderilen_sinyaller.add(sinyal_id)
 
                     sinyaller.append({
                         "Yön": aksiyon,
@@ -302,11 +337,11 @@ def piyasa_tara():
 
     return pd.DataFrame(sinyaller)
 
-# --- ÇALIŞTIRMA & GÖRÜNTÜLEME ---
+# --- BUTON & CANLI ÇALIŞTIRMA ---
 manuel_tara = st.button("🔍 Şimdi Tara", type="primary", use_container_width=True)
 
 if oto_yenileme or manuel_tara:
-    with st.spinner("Piyasa taranıyor ve grafikler hazırlanıyor..."):
+    with st.spinner("Piyasa taranıyor ve sinyaller gönderiliyor..."):
         df_sonuc = piyasa_tara()
         
     if not df_sonuc.empty:
