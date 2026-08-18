@@ -3,39 +3,42 @@ import ccxt
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="Gelişmiş MEXC Kripto Radarı", layout="wide")
+# Sayfa Yapılandırması
+st.set_page_config(page_title="MEXC Futures Sinyal Radarı", layout="wide")
 
-st.title("🐋 MEXC Akıllı Sinyal & Balina Radarı")
+st.title("⚡ MEXC Vadeli (Futures) Algoritmik Sinyal Radarı")
+st.caption("Piyasadaki likidite patlamalarını, kırılımları ve tepe/dip tuzaklarını tarar.")
 
-# --- SOL YAN PANEL (FİLTRELER) ---
-st.sidebar.header("⚙️ Tarama Parametreleri")
+# --- YAN MENÜ PARAMETRELERİ ---
+st.sidebar.header("🎯 Strateji & Filtre Ayarları")
 
 zaman_dilimi = st.sidebar.selectbox(
-    "Zaman Dilimi",
-    options=["1m", "5m", "15m", "1h", "4h"],
-    index=2
+    "Zaman Dilimi (Timeframe)",
+    options=["5m", "15m", "1h", "4h"],
+    index=1,
+    help="Scalp için 5m/15m, swing için 1h/4h önerilir."
 )
 
-hacim_esigi = st.sidebar.slider(
-    "Hacim Artış Eşiği (%)",
-    min_value=100,
-    max_value=1000,
-    value=200,
-    step=50,
-    help="Örnek: 200 seçilirse, son mumun hacmi ortalamanın 2 katı olmalıdır."
+hacim_carpani = st.sidebar.slider(
+    "Minimum Hacim Patlama Katı",
+    min_value=1.5,
+    max_value=5.0,
+    value=2.0,
+    step=0.5,
+    help="Son mumun hacmi, önceki 19 mum ortalamasının kaç katı olsun?"
 )
 
-coin_limiti = st.sidebar.select_slider(
-    "Taranacak En Popüler Coin Sayısı",
-    options=[30, 50, 100, 150, 200],
+coin_adedi = st.sidebar.select_slider(
+    "Taranacak En Yüksek Hacimli Coin Sayısı",
+    options=[30, 50, 100, 150],
     value=50
 )
 
 st.sidebar.markdown("---")
-st.sidebar.info("💡 **İpucu:** Hiçbir sonuç çıkmıyorsa Hacim Eşiğini %150'ye düşürün veya 5m/1m zaman dilimini deneyin.")
+st.sidebar.warning("⚠️ **Risk Uyarısı:** Vadeli işlemlerde yüksek kaldıraçtan kaçının ve her zaman Stop-Loss kullanın.")
 
-# --- RSI HESAPLAMA FONKSİYONU ---
-def rsi_hesapla(seri, periyot=14):
+# --- RSI HESAPLAMA ---
+def hesapla_rsi(seri, periyot=14):
     fark = seri.diff(1)
     kazanc = fark.clip(lower=0)
     kayip = -fark.clip(upper=0)
@@ -44,73 +47,110 @@ def rsi_hesapla(seri, periyot=14):
     rs = ortalama_kazanc / ortalama_kayip
     return 100 - (100 / (1 + rs))
 
-# --- ANA TARAYICI MOTORU ---
-def piyasa_tara():
+# --- TARAMA MOTORU ---
+def futures_tara():
     mexc = ccxt.mexc()
     try:
         tickers = mexc.fetch_tickers()
     except Exception as e:
-        st.error(f"Piyasa verileri çekilemedi: {e}")
+        st.error(f"MEXC Veri Hatası: {e}")
         return pd.DataFrame()
-    
-    usdt_pariteler = [s for s in tickers.keys() if '/USDT' in s]
-    usdt_pariteler.sort(key=lambda x: tickers[x].get('quoteVolume', 0), reverse=True)
-    hedef_coinler = usdt_pariteler[:coin_limiti]
 
-    bulunanlar = []
+    usdt_pariteler = [s for s in tickers.keys() if '/USDT' in s and ':' not in s]
+    usdt_pariteler.sort(key=lambda x: tickers[x].get('quoteVolume', 0), reverse=True)
+    hedef_listesi = usdt_pariteler[:coin_adedi]
+
+    sinyaller = []
     progress_bar = st.progress(0)
     durum_metni = st.empty()
 
-    for i, sembol in enumerate(hedef_coinler):
+    for i, sembol in enumerate(hedef_listesi):
         try:
             mumlar = mexc.fetch_ohlcv(sembol, timeframe=zaman_dilimi, limit=25)
             if len(mumlar) >= 20:
                 df = pd.DataFrame(mumlar, columns=['Zaman', 'Acilis', 'Yuksek', 'Dusuk', 'Kapanis', 'Hacim'])
                 
-                # Hacim ortalaması
+                # Değerler
                 gecmis_hacim = df['Hacim'].iloc[:-1].mean()
                 son_hacim = df['Hacim'].iloc[-1]
-                son_fiyat = df['Kapanis'].iloc[-1]
-                acilis_fiyat = df['Acilis'].iloc[-1]
+                son_kapanis = df['Kapanis'].iloc[-1]
+                son_acilis = df['Acilis'].iloc[-1]
+                son_yuksek = df['Yuksek'].iloc[-1]
+                gecmis_en_yuksek = df['Yuksek'].iloc[:-1].max()
                 
-                # Mum içi fiyat değişimi
-                mum_degisim_yuzde = ((son_fiyat - acilis_fiyat) / acilis_fiyat) * 100
-                
-                # RSI Değeri
-                df['RSI'] = rsi_hesapla(df['Kapanis'])
+                # RSI
+                df['RSI'] = hesapla_rsi(df['Kapanis'])
                 son_rsi = round(df['RSI'].iloc[-1], 1) if not np.isnan(df['RSI'].iloc[-1]) else 50.0
+                
+                # Hacim kat oranı ve fiyat değişimi
+                hacim_orani = son_hacim / gecmis_hacim if gecmis_hacim > 0 else 0
+                mum_degisimi = ((son_kapanis - son_acilis) / son_acilis) * 100
 
-                hacim_kat_orani = (son_hacim / gecmis_hacim) * 100
+                # --- STRATEJİ KONTROLLERİ ---
+                sinyal_adi = None
+                aksiyon = None
 
-                if hacim_kat_orani >= hacim_esigi:
-                    sinyal_tipi = "🚀 Alış Baskısı" if mum_degisim_yuzde >= 0 else "🔻 Satış Baskısı"
+                # 1. Strateji: Balina Kırılımı (Hacimli Direnç Kırılımı)
+                if (hacim_orani >= hacim_carpani) and (son_kapanis >= gecmis_en_yuksek) and (45 <= son_rsi <= 75):
+                    sinyal_adi = "🚀 DİRENÇ KIRILIMI (PUMP)"
+                    aksiyon = "🟢 LONG"
+
+                # 2. Strateji: Dip Avcısı (Oversold Hacimli Tepki)
+                elif (hacim_orani >= hacim_carpani) and (son_rsi <= 32) and (mum_degisimi > 0):
+                    sinyal_adi = "🩸 DİP DÖNÜŞ TEPKİSİ"
+                    aksiyon = "🟢 LONG"
+
+                # 3. Strateji: Tepe Boğa Tuzağı (Short Fırsatı)
+                elif (hacim_orani >= hacim_carpani) and (son_rsi >= 75) and (mum_degisimi < 0):
+                    sinyal_adi = "🪤 BOĞA TUZAĞI (TEPEDEN RET)"
+                    aksiyon = "🔴 SHORT"
+
+                # 4. Genel Anormal Hacim Hareketi
+                elif hacim_orani >= (hacim_carpani * 1.5):
+                    sinyal_adi = "⚡ ANORMAL HACİM HAREKETİ"
+                    aksiyon = "🟢 LONG" if mum_degisimi >= 0 else "🔴 SHORT"
+
+                if sinyal_adi:
+                    saf_sembol = sembol.replace('/', '_')
+                    mexc_link = f"https://www.mexc.com/tr-TR/futures/{saf_sembol}"
                     
-                    bulunanlar.append({
-                        "Durum": sinyal_tipi,
+                    sinyaller.append({
+                        "Yön": aksiyon,
+                        "Sinyal Türü": sinyal_adi,
                         "Sembol": sembol,
-                        "Fiyat ($)": son_fiyat,
-                        "Hacim Artışı": f"%{round(hacim_kat_orani, 1)}",
-                        "Mum Değişimi": f"%{round(mum_degisim_yuzde, 2)}",
-                        "RSI (14)": son_rsi
+                        "Fiyat ($)": son_kapanis,
+                        "Hacim Katı": f"{round(hacim_orani, 1)}x",
+                        "Mum %": f"%{round(mum_degisimi, 2)}",
+                        "RSI (14)": son_rsi,
+                        "Grafik": mexc_link
                     })
         except Exception:
             pass
 
-        progress_bar.progress((i + 1) / len(hedef_coinler))
-        durum_metni.text(f"Analiz ediliyor: {sembol} ({i+1}/{len(hedef_coinler)})")
+        progress_bar.progress((i + 1) / len(hedef_listesi))
+        durum_metni.text(f"Piyasa taranıyor: {sembol} ({i+1}/{len(hedef_listesi)})")
 
     progress_bar.empty()
     durum_metni.empty()
-    return pd.DataFrame(bulunanlar)
+    return pd.DataFrame(sinyaller)
 
-# --- ÇALIŞTIRMA BUTONU VE GÖRSELLEŞTİRME ---
-if st.button("🔍 Radarı Çalıştır", type="primary", use_container_width=True):
-    df_sonuclar = piyasa_tara()
+# --- EKRANA BASMA ---
+if st.button("🔥 Vadeli Sinyalleri Tara", type="primary", use_container_width=True):
+    df_sonuc = futures_tara()
     
-    if not df_sonuclar.empty:
-        st.success(f"Toplam {len(df_sonuclar)} adet potansiyel hareket tespit edildi!")
+    if not df_sonuc.empty:
+        st.success(f"Piyasada {len(df_sonuc)} adet vadeli işlem fırsatı tespit edildi!")
         
-        # Tabloyu göster
-        st.dataframe(df_sonuclar, use_container_width=True)
+        # Link sütununu tıklanabilir link haline getirelim
+        st.dataframe(
+            df_sonuc,
+            column_config={
+                "Grafik": st.column_config.LinkColumn(
+                    "MEXC Futures",
+                    display_text="Grafiği Aç ↗"
+                )
+            },
+            use_container_width=True
+        )
     else:
-        st.warning(f"Seçilen ayarlarda ({zaman_dilimi} - %{hacim_esigi} Hacim Eşiği) kriterlere uyan coin bulunamadı. Eşik değerini düşürmeyi veya zaman dilimini değiştirmeyi deneyin.")
+        st.info("Şu anda seçtiğiniz filtrelere uyan net bir kırılım/tuzak sinyali yok. Hacim katsayısını 1.5x yaparak tekrar deneyebilirsiniz.")
