@@ -47,7 +47,7 @@ st.sidebar.markdown("---")
 st.sidebar.header("🎯 Tarama Parametreleri")
 
 zaman_dilimi = st.sidebar.selectbox("Zaman Dilimi (Timeframe)", options=["15m", "1h", "4h", "1d"], index=1)
-coin_adedi = st.sidebar.select_slider("Taranacak En Yüksek Hacimli Coin Sayısı", options=[20, 50, 100, 150, 200], value=100)
+coin_adedi = st.sidebar.select_slider("Taranacak En Yüksek Hacimli Coin Sayısı", options=[20, 50, 100, 150, 200], value=60)
 min_hacim_kati = st.sidebar.slider("Minimum Hacim Patlaması Katı", 1.2, 5.0, 1.8, 0.1)
 
 st.title("🦅 KENDİNE22TRADER - MEXC VIP Long/Short Sinyal Radarı")
@@ -126,84 +126,113 @@ def hesapla_tp_sl(fiyat, atr, yon="LONG"):
         tp2 = round(fiyat - (atr * 3.0), 6)
     return tp1, tp2, sl
 
-# --- PİYASA TARAYICI ---
+# --- 403 ENGELİNİ AŞAN DOĞRUDAN MEXC VADELİ API MOTORU ---
 def piyasa_tara():
-    mexc = ccxt.mexc({'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*"
+    }
     
+    # 1. MEXC Vadeli Kontrat Listesini ve Hacimleri Çek
     try:
-        tickers = mexc.fetch_tickers()
+        url_tickers = "https://contract.mexc.com/api/v1/contract/ticker"
+        res = requests.get(url_tickers, headers=headers, timeout=6).json()
+        if not res.get("success", False):
+            st.error("MEXC Vadeli Veri Akışı Hatası")
+            return pd.DataFrame()
+            
+        data_tickers = res.get("data", [])
+        usdt_pariteler = [d for d in data_tickers if d.get("symbol", "").endswith("_USDT")]
+        usdt_pariteler.sort(key=lambda x: float(x.get("amount24", 0) or 0), reverse=True)
+        hedef_listesi = usdt_pariteler[:coin_adedi]
     except Exception as e:
         st.error(f"MEXC Bağlantı Hatası: {e}")
         return pd.DataFrame()
-        
-    usdt_pariteler = [s for s in tickers.keys() if '/USDT' in s]
-    usdt_pariteler.sort(key=lambda x: tickers[x].get('quoteVolume', 0) or 0, reverse=True)
-    hedef_listesi = usdt_pariteler[:coin_adedi]
-    
+
     sonuclar = []
-    
-    for sembol in hedef_listesi:
+    interval_map = {"15m": "Min15", "1h": "Min60", "4h": "Hour4", "1d": "Day1"}
+    secili_interval = interval_map.get(zaman_dilimi, "Min60")
+
+    for coin_bilgi in hedef_listesi:
+        sembol_raw = coin_bilgi["symbol"] # Örn: BTC_USDT
         try:
-            mumlar = mexc.fetch_ohlcv(sembol, timeframe=zaman_dilimi, limit=40)
-            if len(mumlar) >= 20:
-                df = pd.DataFrame(mumlar, columns=['Zaman', 'Acilis', 'Yuksek', 'Dusuk', 'Kapanis', 'Hacim'])
+            url_kline = f"https://contract.mexc.com/api/v1/contract/kline/{sembol_raw}?interval={secili_interval}"
+            kline_res = requests.get(url_kline, headers=headers, timeout=4).json()
+            
+            if kline_res.get("success", False) and kline_res.get("data"):
+                k_data = kline_res["data"]
+                times = k_data.get("time", [])
+                opens = k_data.get("open", [])
+                closes = k_data.get("close", [])
+                highs = k_data.get("high", [])
+                lows = k_data.get("low", [])
+                vols = k_data.get("vol", [])
                 
-                gecmis_hacim = df['Hacim'].iloc[:-1].mean()
-                son_hacim = df['Hacim'].iloc[-1]
-                hacim_orani = (son_hacim / gecmis_hacim) if gecmis_hacim > 0 else 0
-                
-                df['RSI'] = hesapla_rsi(df['Kapanis'])
-                son_rsi = df['RSI'].iloc[-1]
-                son_kapanis = df['Kapanis'].iloc[-1]
-                son_acilis = df['Acilis'].iloc[-1]
-                
-                long_kosulu = (hacim_orani >= min_hacim_kati) and (son_kapanis > son_acilis) and (son_rsi <= 65)
-                short_kosulu = (hacim_orani >= min_hacim_kati) and (son_kapanis < son_acilis) and (son_rsi >= 35)
-                
-                if long_kosulu or short_kosulu:
-                    yon = "🟢 LONG" if long_kosulu else "🔴 SHORT"
-                    temiz_parite = sembol.split(':')[0]
-                    mexc_kod = temiz_parite.replace('/', '_')
-                    mexc_link = f"https://www.mexc.com/tr-TR/futures/{mexc_kod}"
-                    
-                    atr = hesapla_atr(df)
-                    yon_turu = "LONG" if long_kosulu else "SHORT"
-                    tp1, tp2, sl = hesapla_tp_sl(son_kapanis, atr, yon=yon_turu)
-                    
-                    sinyal_id = f"{temiz_parite}_{yon}_{zaman_dilimi}"
-                    
-                    if telegram_aktif and sinyal_id not in st.session_state.gonderilen_sinyaller:
-                        tg_caption = (
-                            f"⚡ <b>KENDİNE22TRADER VIP SİNYALİ</b>\n\n"
-                            f"📌 <b>Parite:</b> {temiz_parite}\n"
-                            f"🎯 <b>Yön:</b> {yon}\n"
-                            f"⏱ <b>Zaman:</b> {zaman_dilimi}\n"
-                            f"💰 <b>Giriş Fiyatı:</b> {son_kapanis} $\n"
-                            f"📊 <b>Hacim Katı:</b> {round(hacim_orani, 1)}x\n"
-                            f"📈 <b>RSI:</b> {round(son_rsi, 1)}\n\n"
-                            f"🎯 <b>HEDEF 1 (TP1):</b> {tp1} $\n"
-                            f"🎯 <b>HEDEF 2 (TP2):</b> {tp2} $\n"
-                            f"🛑 <b>STOP-LOSS:</b> {sl} $\n\n"
-                            f"🔗 <a href='{mexc_link}'>MEXC Vadeli Grafiği Aç ↗</a>"
-                        )
-                        try:
-                            foto_buffer = grafik_olustur(df, temiz_parite, zaman_dilimi)
-                            telegram_fotograf_gonder(foto_buffer, tg_caption)
-                        except Exception:
-                            pass
-                            
-                        st.session_state.gonderilen_sinyaller.add(sinyal_id)
-                    
-                    sonuclar.append({
-                        "Yön": yon,
-                        "Sembol": temiz_parite,
-                        "Fiyat ($)": son_kapanis,
-                        "Hacim Katı": f"{round(hacim_orani, 1)}x",
-                        "RSI": round(son_rsi, 1),
-                        "TP1 ($)": tp1,
-                        "SL ($)": sl,
-                        "Grafik": mexc_link
+                if len(closes) >= 20:
+                    df = pd.DataFrame({
+                        "Zaman": [t * 1000 for t in times[-40:]],
+                        "Acilis": [float(x) for x in opens[-40:]],
+                        "Yuksek": [float(x) for x in highs[-40:]],
+                        "Dusuk": [float(x) for x in lows[-40:]],
+                        "Kapanis": [float(x) for x in closes[-40:]],
+                        "Hacim": [float(x) for x in vols[-40:]]
                     })
+                    
+                    gecmis_hacim = df['Hacim'].iloc[:-1].mean()
+                    son_hacim = df['Hacim'].iloc[-1]
+                    hacim_orani = (son_hacim / gecmis_hacim) if gecmis_hacim > 0 else 0
+                    
+                    df['RSI'] = hesapla_rsi(df['Kapanis'])
+                    son_rsi = df['RSI'].iloc[-1]
+                    son_kapanis = df['Kapanis'].iloc[-1]
+                    son_acilis = df['Acilis'].iloc[-1]
+                    
+                    long_kosulu = (hacim_orani >= min_hacim_kati) and (son_kapanis > son_acilis) and (son_rsi <= 65)
+                    short_kosulu = (hacim_orani >= min_hacim_kati) and (son_kapanis < son_acilis) and (son_rsi >= 35)
+                    
+                    if long_kosulu or short_kosulu:
+                        yon = "🟢 LONG" if long_kosulu else "🔴 SHORT"
+                        temiz_parite = sembol_raw.replace('_', '/')
+                        mexc_link = f"https://www.mexc.com/tr-TR/futures/{sembol_raw}"
+                        
+                        atr = hesapla_atr(df)
+                        yon_turu = "LONG" if long_kosulu else "SHORT"
+                        tp1, tp2, sl = hesapla_tp_sl(son_kapanis, atr, yon=yon_turu)
+                        
+                        sinyal_id = f"{sembol_raw}_{yon}_{zaman_dilimi}"
+                        
+                        if telegram_aktif and sinyal_id not in st.session_state.gonderilen_sinyaller:
+                            tg_caption = (
+                                f"⚡ <b>KENDİNE22TRADER VIP SİNYALİ</b>\n\n"
+                                f"📌 <b>Parite:</b> {temiz_parite}\n"
+                                f"🎯 <b>Yön:</b> {yon}\n"
+                                f"⏱ <b>Zaman:</b> {zaman_dilimi}\n"
+                                f"💰 <b>Giriş Fiyatı:</b> {son_kapanis} $\n"
+                                f"📊 <b>Hacim Katı:</b> {round(hacim_orani, 1)}x\n"
+                                f"📈 <b>RSI:</b> {round(son_rsi, 1)}\n\n"
+                                f"🎯 <b>HEDEF 1 (TP1):</b> {tp1} $\n"
+                                f"🎯 <b>HEDEF 2 (TP2):</b> {tp2} $\n"
+                                f"🛑 <b>STOP-LOSS:</b> {sl} $\n\n"
+                                f"🔗 <a href='{mexc_link}'>MEXC Vadeli Grafiği Aç ↗</a>"
+                            )
+                            try:
+                                foto_buffer = grafik_olustur(df, temiz_parite, zaman_dilimi)
+                                telegram_fotograf_gonder(foto_buffer, tg_caption)
+                            except Exception:
+                                pass
+                                
+                            st.session_state.gonderilen_sinyaller.add(sinyal_id)
+                        
+                        sonuclar.append({
+                            "Yön": yon,
+                            "Sembol": temiz_parite,
+                            "Fiyat ($)": son_kapanis,
+                            "Hacim Katı": f"{round(hacim_orani, 1)}x",
+                            "RSI": round(son_rsi, 1),
+                            "TP1 ($)": tp1,
+                            "SL ($)": sl,
+                            "Grafik": mexc_link
+                        })
         except Exception:
             pass
             
@@ -213,11 +242,11 @@ def piyasa_tara():
 manuel_tara = st.button("🔍 Piyasayı Manuel Tara", type="primary", use_container_width=True)
 
 if oto_yenileme or manuel_tara:
-    with st.spinner("Piyasa taranıyor ve analiz ediliyor..."):
+    with st.spinner("MEXC Vadeli piyasası taranıyor ve analiz ediliyor..."):
         df_sonuc = piyasa_tara()
         
     if not df_sonuc.empty:
-        st.success(f"Tespit Edilen Sinyaller ({pd.Timestamp.now().strftime('%H:%M:%S')}):")
+        st.success(f"Tespit Edilen VIP Sinyaller ({pd.Timestamp.now().strftime('%H:%M:%S')}):")
         st.dataframe(
             df_sonuc,
             column_config={"Grafik": st.column_config.LinkColumn("MEXC Link", display_text="Grafiği Aç ↗")},
