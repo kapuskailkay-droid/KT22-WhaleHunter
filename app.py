@@ -19,7 +19,7 @@ MIN_HACIM_KATI = 1.8
 
 # --- SAYFA YAPILANDIRMASI ---
 st.set_page_config(
-    page_title="KENDİNE22TRADER VIP MEXC Çoklu Zaman Radarı",
+    page_title="KT22 - WhaleHunter Çoklu Zaman Radarı",
     layout="wide"
 )
 
@@ -45,7 +45,7 @@ st.sidebar.info("🔍 **Otomatik Taranan Zaman Dilimleri:**\n• 15 Dakika (15m)
 
 coin_adedi = st.sidebar.select_slider("Taranacak En Yüksek Hacimli Coin Sayısı", options=[20, 40, 60, 80, 100], value=50)
 
-st.title("🐋 KENDİNE22TRADER - TÜM ZAMAN DİLİMLERİ BALİNA & VIP SİNYAL RADARI")
+st.title("🐋 KT22 - WHALEHUNTER | BALİNA & VIP SİNYAL RADARI")
 
 # --- GRAFİK OLUŞTURMA ---
 def grafik_olustur(df_mum, sembol, zaman_dilimi_adi):
@@ -205,7 +205,7 @@ def coklu_piyasa_tara():
                             
                             if telegram_aktif and sinyal_id not in st.session_state.gonderilen_sinyaller:
                                 tg_caption = (
-                                    f"🐋 <b>KENDİNE22TRADER BALİNA & VIP SİNYALİ</b>\n\n"
+                                    f"🐋 <b>KT22 WHALEHUNTER SİNYALİ</b>\n\n"
                                     f"📌 <b>Parite:</b> {temiz_parite}\n"
                                     f"⏱ <b>Zaman Dilimi:</b> <b>{tf_ad} ({tf_kod})</b>\n"
                                     f"🎯 <b>Yön:</b> {yon}\n"
