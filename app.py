@@ -1,327 +1,315 @@
 import io
+import os
+import threading
 import time
-import urllib.parse
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import matplotlib
+import matplotlib.pyplot as plt
 import mplfinance as mpf
 import numpy as np
 import pandas as pd
 import requests
-import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 
 matplotlib.use('Agg')
 
-# --- SABİT BOT VE TELEGRAM AYARLARI (GÖMÜLÜ) ---
-GOMULU_BOT_TOKEN = "7820599329:AAEAa13edhS9PLoG1t8R34PLO9xpKlaT_Lc"
-GOMULU_CHAT_ID = "-1004434260285"
-GOMULU_TOPIC_ID = "387"
-MIN_HACIM_KATI = 1.8
+# --- SABİT BOT VE TELEGRAM AYARLARI ---
+BOT_TOKEN = "7820599329:AAEAa13edhS9PLoG1t8R34PLO9xpKlaT_Lc"
+CHAT_ID = "-1004434260285"
+TOPIC_ID = 387
+COIN_ADEDI = 200
 
-# --- SAYFA YAPILANDIRMASI ---
-st.set_page_config(
-    page_title="KT22 - WhaleHunter Çoklu Zaman Radarı", layout="wide"
-)
-
-if "gonderilen_sinyaller" not in st.session_state:
-  st.session_state.gonderilen_sinyaller = set()
-
-# --- YAN PANEL: TELEGRAM AYARLARI ---
-st.sidebar.header("📱 Telegram Bildirim Ayarları")
-telegram_aktif = st.sidebar.checkbox("🚀 Telegram'a Gönder", value=True)
-bot_token = st.sidebar.text_input(
-    "Telegram Bot Token", value=GOMULU_BOT_TOKEN, type="password"
-)
-chat_id = st.sidebar.text_input("Telegram Chat ID", value=GOMULU_CHAT_ID)
-topic_id = st.sidebar.text_input("Telegram Topic ID", value=GOMULU_TOPIC_ID)
-
-st.sidebar.markdown("---")
-st.sidebar.header("⚙️ Canlı Yayın & Otomatik Yenileme")
-
-oto_yenileme = st.sidebar.checkbox("🔄 Otomatik Canlı Taramayı Aç", value=True)
-st_autorefresh(interval=60 * 1000, key="canli_vip_tarayici")
-st.sidebar.success("🟢 Canlı mod aktif: Her 1 dakikada bir yenileniyor")
-
-st.sidebar.markdown("---")
-st.sidebar.info(
-    "🔍 **Otomatik Taranan Zaman Dilimleri:**\n• 15 Dakika (15m)\n• 30 Dakika"
-    " (30m)\n• 1 Saat (1h)\n• 4 Saat (4h)\n• 1 Gün (1d)\n• 1 Hafta (1w)\n\n🐋"
-    " **Minimum Hacim Patlaması:** 1.8x"
-)
-
-# Düzeltilen Satır:
-coin_adedi = st.sidebar.select_slider(
-    "Taranacak En Yüksek Hacimli Coin Sayısı",
-    options=[20, 40, 50, 60, 80, 100],
-    value=50,
-)
-
-st.title("🐋 KT22 - WHALEHUNTER | BALİNA & VIP SİNYAL RADARI")
+hafiza = set()
 
 
-# --- GRAFİK OLUŞTURMA ---
-def grafik_olustur(df_mum, sembol, zaman_dilimi_adi):
+# Render Port Dinleyicisi (7/24 Kesintisiz Çalışma)
+class HealthCheckHandler(BaseHTTPRequestHandler):
+
+  def do_GET(self):
+    self.send_response(200)
+    self.send_header('Content-type', 'text/plain; charset=utf-8')
+    self.end_headers()
+    self.wfile.write(b'KENDINE22TRADER WhaleHunter 200 Coin Aktif!')
+
+  def log_message(self, format, *args):
+    return
+
+
+def start_http_server():
+  port = int(os.environ.get('PORT', 10000))
+  server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+  server.serve_forever()
+
+
+def telegram_foto_gonder(foto_buf, caption):
+  url = f'https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto'
+  data = {
+      'chat_id': CHAT_ID,
+      'message_thread_id': TOPIC_ID,
+      'caption': caption,
+      'parse_mode': 'HTML',
+  }
+  files = {'photo': ('chart.png', foto_buf, 'image/png')}
+  try:
+    requests.post(url, data=data, files=files, timeout=15)
+  except Exception as e:
+    print(f'Telegram Fotoğraf Hatası: {e}')
+
+
+def grafik_ciz(df_mum, sembol, tf_etiket, tp1, tp2, sl):
   df_grafik = df_mum.copy()
-  df_grafik["Zaman"] = pd.to_datetime(df_grafik["Zaman"], unit="ms")
-  df_grafik.set_index("Zaman", inplace=True)
+  df_grafik['Zaman'] = pd.to_datetime(df_grafik['Zaman'], unit='ms')
+  df_grafik.set_index('Zaman', inplace=True)
   df_grafik.rename(
       columns={
-          "Acilis": "Open",
-          "Yuksek": "High",
-          "Dusuk": "Low",
-          "Kapanis": "Close",
-          "Hacim": "Volume",
+          'Acilis': 'Open',
+          'Yuksek': 'High',
+          'Dusuk': 'Low',
+          'Kapanis': 'Close',
+          'Hacim': 'Volume',
       },
       inplace=True,
   )
+  df_plot = df_grafik.tail(40)
 
-  mc = mpf.make_marketcolors(up="#00ff88", down="#ff3366", inherit=True)
+  mc = mpf.make_marketcolors(
+      up='#00FF88', down='#FF3366', inherit=True, volume='in'
+  )
   s = mpf.make_mpf_style(
-      base_mpf_style="nightclouds", marketcolors=mc, gridcolor="#2b2b2b"
+      base_mpf_style='nightclouds',
+      marketcolors=mc,
+      gridcolor='#20242C',
+      facecolor='#0E1117',
+      edgecolor='#30363D',
+      figcolor='#0E1117',
+  )
+  hlines_dict = dict(
+      hlines=[tp1, tp2, sl],
+      colors=['#00FF88', '#38EF7D', '#FF3366'],
+      linestyle=['--', '-.', ':'],
+      linewidths=[1.6, 1.4, 1.6],
   )
 
   buf = io.BytesIO()
-  mpf.plot(
-      df_grafik.tail(40),
-      type="candle",
+  fig, axes = mpf.plot(
+      df_plot,
+      type='candle',
       volume=True,
       style=s,
-      title=f"{sembol} ({zaman_dilimi_adi})",
-      savefig=dict(fname=buf, dpi=120, bbox_inches="tight"),
+      hlines=hlines_dict,
+      returnfig=True,
+      figsize=(9, 5.5),
+      savefig=dict(dpi=130, bbox_inches='tight'),
   )
+  ax_main = axes[0]
+  ax_main.set_title(
+      f'KENDİNE22TRADER | {sembol} ({tf_etiket}) BALİNA SİNYALİ',
+      fontsize=11,
+      fontweight='bold',
+      color='#00D4FF',
+      pad=10,
+  )
+
+  son_x = len(df_plot) - 1
+  ax_main.text(
+      son_x,
+      tp1,
+      f' TP1: {tp1}$',
+      color='#00FF88',
+      fontsize=8,
+      fontweight='bold',
+      verticalalignment='center',
+  )
+  ax_main.text(
+      son_x,
+      sl,
+      f' SL: {sl}$',
+      color='#FF3366',
+      fontsize=8,
+      fontweight='bold',
+      verticalalignment='center',
+  )
+
+  fig.savefig(buf, format='png', bbox_inches='tight', facecolor='#0E1117')
   buf.seek(0)
+  plt.close('all')
   return buf
 
 
-# --- TELEGRAM FOTOĞRAF GÖNDERME (TOPIC 387 KİLİTLİ) ---
-def telegram_fotograf_gonder(foto_buf, caption_metni):
-  if telegram_aktif and bot_token and chat_id:
-    url = f"https://api.telegram.org/bot{bot_token.strip()}/sendPhoto"
-    hedef_topic = (
-        str(topic_id).strip()
-        if (topic_id and str(topic_id).strip() != "")
-        else GOMULU_TOPIC_ID
-    )
+# --- FAKE SİNYAL ENGELLEYİCİ VE BALİNA FİLTRESİ ---
+def balina_ve_onay_kontrol(df):
+  if len(df) < 25:
+    return None, 0, 0
 
-    data = {
-        "chat_id": chat_id.strip(),
-        "caption": caption_metni,
-        "parse_mode": "HTML",
-    }
-    if hedef_topic:
-      try:
-        data["message_thread_id"] = int(hedef_topic)
-      except ValueError:
-        pass
+  closes = df['Kapanis'].values
+  opens = df['Acilis'].values
+  highs = df['Yuksek'].values
+  lows = df['Dusuk'].values
+  vols = df['Hacim'].values
 
-    files = {"photo": ("chart.png", foto_buf, "image/png")}
-    try:
-      requests.post(url, data=data, files=files, timeout=14)
-    except Exception:
-      pass
+  # 1. Hacim Katı Kontrolü (Son 20 mum ortalaması)
+  ort_hacim = np.mean(vols[-21:-1])
+  son_hacim = vols[-1]
+  if ort_hacim <= 0:
+    return None, 0, 0
+  hacim_kati = son_hacim / ort_hacim
 
+  # En az 1.6x hacim patlaması aranır
+  if hacim_kati < 1.6:
+    return None, 0, 0
 
-# --- İNDİKATÖR HESAPLAMALARI ---
-def hesapla_rsi(seri, periyot=14):
-  fark = seri.diff()
-  kazanc = (fark.where(fark > 0, 0)).rolling(window=periyot).mean()
-  kayip = (-fark.where(fark < 0, 0)).rolling(window=periyot).mean()
-  rs = kazanc / (kayip + 1e-9)
-  return 100 - (100 / (1 + rs))
+  # 2. Gövde Gücü (Fake Fitil / Likidite İğnesi Eleme)
+  toplam_boyut = highs[-1] - lows[-1]
+  if toplam_boyut <= 0:
+    return None, 0, 0
+  govde_boyutu = abs(closes[-1] - opens[-1])
+  govde_orani = govde_boyutu / toplam_boyut
 
+  # Mumun en az %45'i gövde olmalı (Doji ve kararsız mumları eler)
+  if govde_orani < 0.45:
+    return None, 0, 0
 
-def hesapla_atr(df, periyot=14):
-  h_l = df["Yuksek"] - df["Dusuk"]
-  h_pc = (df["Yuksek"] - df["Kapanis"].shift(1)).abs()
-  l_pc = (df["Dusuk"] - df["Kapanis"].shift(1)).abs()
-  tr = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
-  atr_val = tr.rolling(window=periyot).mean().iloc[-1]
-  return atr_val if not np.isnan(atr_val) else df["Kapanis"].iloc[-1] * 0.02
+  # 3. RSI Hesaplama (14 Periyot)
+  delta = pd.Series(closes).diff()
+  gain = delta.where(delta > 0, 0.0).rolling(14).mean()
+  loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+  rs = gain / (loss + 1e-9)
+  rsi = float((100 - (100 / (1 + rs))).iloc[-1])
 
+  # 4. Yön ve Trend Doğrulaması
+  # LONG Şartı: Yeşil dolgun mum + Hacim + RSI aşırı şişmemiş (35 - 72 bandı)
+  if (closes[-1] > opens[-1]) and (35 <= rsi <= 72):
+    return 'LONG', round(hacim_kati, 2), round(rsi, 1)
 
-def hesapla_tp_sl(fiyat, atr, yon="LONG"):
-  if yon == "LONG":
-    sl = round(fiyat - (atr * 1.5), 6)
-    tp1 = round(fiyat + (atr * 1.5), 6)
-    tp2 = round(fiyat + (atr * 3.0), 6)
-  else:
-    sl = round(fiyat + (atr * 1.5), 6)
-    tp1 = round(fiyat - (atr * 1.5), 6)
-    tp2 = round(fiyat - (atr * 3.0), 6)
-  return tp1, tp2, sl
+  # SHORT Şartı: Kırmızı dolgun mum + Hacim + RSI aşırı dipte değil (28 - 65 bandı)
+  elif (closes[-1] < opens[-1]) and (28 <= rsi <= 65):
+    return 'SHORT', round(hacim_kati, 2), round(rsi, 1)
+
+  return None, 0, 0
 
 
-# --- ÇOKLU ZAMAN DİLİMLİ MEXC VADELİ TARAYICI ---
-def coklu_piyasa_tara():
+def main():
+  threading.Thread(target=start_http_server, daemon=True).start()
+  print('🚀 KENDİNE22TRADER WhaleHunter (200 Coin + Anti-Fake) Başlatıldı...')
+
   headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
-          " like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      'User-Agent': (
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,'
+          ' like Gecko) Chrome/120.0.0.0 Safari/537.36'
       ),
-      "Accept": "application/json, text/plain, */*",
+      'Accept': 'application/json, text/plain, */*',
   }
 
-  try:
-    url_tickers = "https://contract.mexc.com/api/v1/contract/ticker"
-    res = requests.get(url_tickers, headers=headers, timeout=6).json()
-    if not res.get("success", False):
-      st.error("MEXC Vadeli Veri Akışı Hatası")
-      return pd.DataFrame()
-
-    data_tickers = res.get("data", [])
-    usdt_pariteler = [
-        d for d in data_tickers if d.get("symbol", "").endswith("_USDT")
-    ]
-    usdt_pariteler.sort(
-        key=lambda x: float(x.get("amount24", 0) or 0), reverse=True
-    )
-    hedef_listesi = usdt_pariteler[:coin_adedi]
-  except Exception as e:
-    st.error(f"MEXC Bağlantı Hatası: {e}")
-    return pd.DataFrame()
-
   zaman_dilimleri = [
-      ("Min15", "15m", "15 Dakika"),
-      ("Min30", "30m", "30 Dakika"),
-      ("Min60", "1h", "1 Saat"),
-      ("Hour4", "4h", "4 Saat"),
-      ("Day1", "1d", "1 Gün"),
-      ("Week1", "1w", "1 Hafta"),
+      ('Min15', '15m', '15 Dakika'),
+      ('Min30', '30m', '30 Dakika'),
+      ('Min60', '1h', '1 Saat'),
+      ('Hour4', '4h', '4 Saat'),
   ]
 
-  sonuclar = []
+  while True:
+    try:
+      # MEXC Vadeli 200 Parite Çekimi
+      url_tickers = 'https://contract.mexc.com/api/v1/contract/ticker'
+      res = requests.get(url_tickers, headers=headers, timeout=8).json()
 
-  for coin_bilgi in hedef_listesi:
-    sembol_raw = coin_bilgi["symbol"]
-    temiz_parite = sembol_raw.replace("_", "/")
-    mexc_link = f"https://www.mexc.com/tr-TR/futures/{sembol_raw}"
+      if res.get('success', False):
+        data_tickers = res.get('data', [])
+        usdt_pariteler = [
+            d for d in data_tickers if d.get('symbol', '').endswith('_USDT')
+        ]
+        usdt_pariteler.sort(
+            key=lambda x: float(x.get('amount24', 0) or 0), reverse=True
+        )
+        hedef_listesi = usdt_pariteler[:COIN_ADEDI]
 
-    for api_tf, tf_kod, tf_ad in zaman_dilimleri:
-      try:
-        url_kline = f"https://contract.mexc.com/api/v1/contract/kline/{sembol_raw}?interval={api_tf}"
-        kline_res = requests.get(url_kline, headers=headers, timeout=3).json()
+        for coin in hedef_listesi:
+          sembol_raw = coin['symbol']
+          temiz_parite = sembol_raw.replace('_', '/')
+          mexc_link = f'https://www.mexc.com/tr-TR/futures/{sembol_raw}'
 
-        if kline_res.get("success", False) and kline_res.get("data"):
-          k_data = kline_res["data"]
-          times = k_data.get("time", [])
-          opens = k_data.get("open", [])
-          closes = k_data.get("close", [])
-          highs = k_data.get("high", [])
-          lows = k_data.get("low", [])
-          vols = k_data.get("vol", [])
+          for api_tf, tf_kod, tf_ad in zaman_dilimleri:
+            try:
+              url_kline = f'https://contract.mexc.com/api/v1/contract/kline/{sembol_raw}?interval={api_tf}'
+              kline_res = requests.get(
+                  url_kline, headers=headers, timeout=3
+              ).json()
 
-          if len(closes) >= 20:
-            df = pd.DataFrame({
-                "Zaman": [t * 1000 for t in times[-40:]],
-                "Acilis": [float(x) for x in opens[-40:]],
-                "Yuksek": [float(x) for x in highs[-40:]],
-                "Dusuk": [float(x) for x in lows[-40:]],
-                "Kapanis": [float(x) for x in closes[-40:]],
-                "Hacim": [float(x) for x in vols[-40:]],
-            })
+              if kline_res.get('success', False) and kline_res.get('data'):
+                k_data = kline_res['data']
+                times = k_data.get('time', [])
+                opens = k_data.get('open', [])
+                closes = k_data.get('close', [])
+                highs = k_data.get('high', [])
+                lows = k_data.get('low', [])
+                vols = k_data.get('vol', [])
 
-            gecmis_hacim = df["Hacim"].iloc[:-1].mean()
-            son_hacim = df["Hacim"].iloc[-1]
-            hacim_orani = (son_hacim / gecmis_hacim) if gecmis_hacim > 0 else 0
+                if len(closes) >= 30:
+                  df = pd.DataFrame({
+                      'Zaman': [t * 1000 for t in times[-45:]],
+                      'Acilis': [float(x) for x in opens[-45:]],
+                      'Yuksek': [float(x) for x in highs[-45:]],
+                      'Dusuk': [float(x) for x in lows[-45:]],
+                      'Kapanis': [float(x) for x in closes[-45:]],
+                      'Hacim': [float(x) for x in vols[-45:]],
+                  })
 
-            df["RSI"] = hesapla_rsi(df["Kapanis"])
-            son_rsi = df["RSI"].iloc[-1]
-            son_kapanis = df["Kapanis"].iloc[-1]
-            son_acilis = df["Acilis"].iloc[-1]
+                  yon, hacim_kati, rsi_degeri = balina_ve_onay_kontrol(df)
 
-            long_kosulu = (
-                (hacim_orani >= MIN_HACIM_KATI)
-                and (son_kapanis > son_acilis)
-                and (son_rsi <= 65)
-            )
-            short_kosulu = (
-                (hacim_orani >= MIN_HACIM_KATI)
-                and (son_kapanis < son_acilis)
-                and (son_rsi >= 35)
-            )
+                  if yon:
+                    son_kapanis = df['Kapanis'].iloc[-1]
+                    son_zaman = df['Zaman'].iloc[-1]
+                    sinyal_id = f'{sembol_raw}_{yon}_{tf_kod}_{son_zaman}'
 
-            if long_kosulu or short_kosulu:
-              yon = "🟢 LONG" if long_kosulu else "🔴 SHORT"
-              atr = hesapla_atr(df)
-              yon_turu = "LONG" if long_kosulu else "SHORT"
-              tp1, tp2, sl = hesapla_tp_sl(son_kapanis, atr, yon=yon_turu)
+                    if sinyal_id not in hafiza:
+                      atr = (
+                          (df['Yuksek'] - df['Dusuk'])
+                          .rolling(14)
+                          .mean()
+                          .iloc[-1]
+                      )
+                      if np.isnan(atr):
+                        atr = son_kapanis * 0.018
 
-              sinyal_id = f"{sembol_raw}_{yon}_{tf_kod}"
+                      if yon == 'LONG':
+                        sl = round(son_kapanis - (atr * 1.5), 6)
+                        tp1 = round(son_kapanis + (atr * 1.8), 6)
+                        tp2 = round(son_kapanis + (atr * 3.5), 6)
+                        yon_emoji = '🟢 LONG'
+                      else:
+                        sl = round(son_kapanis + (atr * 1.5), 6)
+                        tp1 = round(son_kapanis - (atr * 1.8), 6)
+                        tp2 = round(son_kapanis - (atr * 3.5), 6)
+                        yon_emoji = '🔴 SHORT'
 
-              if (
-                  telegram_aktif
-                  and sinyal_id not in st.session_state.gonderilen_sinyaller
-              ):
-                tg_caption = (
-                    "🐋 <b>KT22 WHALEHUNTER SİNYALİ</b>\n\n"
-                    f"📌 <b>Parite:</b> {temiz_parite}\n"
-                    f"⏱ <b>Zaman Dilimi:</b> <b>{tf_ad} ({tf_kod})</b>\n"
-                    f"🎯 <b>Yön:</b> {yon}\n"
-                    f"💰 <b>Giriş Fiyatı:</b> {son_kapanis} $\n"
-                    f"📊 <b>Balina Hacim Patlaması:</b>"
-                    f" <b>{round(hacim_orani, 2)}x</b>\n"
-                    f"📈 <b>RSI:</b> {round(son_rsi, 1)}\n\n"
-                    f"🎯 <b>HEDEF 1 (TP1):</b> {tp1} $\n"
-                    f"🎯 <b>HEDEF 2 (TP2):</b> {tp2} $\n"
-                    f"🛑 <b>STOP-LOSS:</b> {sl} $\n\n"
-                    f"🔗 <a href='{mexc_link}'>MEXC Vadeli Grafiği Aç ↗</a>"
-                )
-                try:
-                  foto_buffer = grafik_olustur(
-                      df, temiz_parite, f"{tf_ad} ({tf_kod})"
-                  )
-                  telegram_fotograf_gonder(foto_buffer, tg_caption)
-                except Exception:
-                  pass
+                      caption = (
+                          f'🐋 <b>KT22 WHALEHUNTER SİNYALİ (ONAYLI)</b>\n\n'
+                          f'📌 <b>Parite:</b> {temiz_parite}\n'
+                          f'⏱ <b>Zaman Dilimi:</b> {tf_ad} ({tf_kod})\n'
+                          f'🎯 <b>Yön:</b> {yon_emoji}\n'
+                          f'💰 <b>Giriş Fiyatı:</b> {son_kapanis} $\n'
+                          f'📊 <b>Balina Hacim Patlaması:</b> {hacim_kati}x\n'
+                          f'📈 <b>RSI:</b> {rsi_degeri}\n\n'
+                          f'🎯 <b>HEDEF 1 (TP1):</b> {tp1} $\n'
+                          f'🎯 <b>HEDEF 2 (TP2):</b> {tp2} $\n'
+                          f'🛑 <b>STOP-LOSS:</b> {sl} $\n\n'
+                          f"🔗 <a href='{mexc_link}'>MEXC Vadeli Grafiği Aç"
+                          ' ↗</a>'
+                      )
 
-                st.session_state.gonderilen_sinyaller.add(sinyal_id)
+                      foto = grafik_ciz(
+                          df, temiz_parite, f'{tf_ad} ({tf_kod})', tp1, tp2, sl
+                      )
+                      telegram_foto_gonder(foto, caption)
+                      hafiza.add(sinyal_id)
+                      print(f'✅ Onaylı Balina Sinyali: {sinyal_id}')
+                      time.sleep(1.5)
+            except Exception:
+              pass
+    except Exception as e:
+      print(f'Tarama Hatası: {e}')
 
-              sonuclar.append({
-                  "Zaman Dilimi": f"{tf_ad} ({tf_kod})",
-                  "Yön": yon,
-                  "Sembol": temiz_parite,
-                  "Fiyat ($)": son_kapanis,
-                  "Hacim Katı": f"{round(hacim_orani, 2)}x",
-                  "RSI": round(son_rsi, 1),
-                  "TP1 ($)": tp1,
-                  "SL ($)": sl,
-                  "Grafik": mexc_link,
-              })
-      except Exception:
-        pass
-
-  return pd.DataFrame(sonuclar)
+    time.sleep(20)
 
 
-# --- ÇALIŞTIRMA VE GÖRÜNTÜLEME ---
-manuel_tara = st.button(
-    "🔍 Tüm Zaman Dilimlerini Manuel Tara",
-    type="primary",
-    use_container_width=True,
-)
-
-if oto_yenileme or manuel_tara:
-  with st.spinner(
-      "15m, 30m, 1h, 4h, 1d ve 1w zaman dilimlerinde balina hacimleri"
-      " taranıyor..."
-  ):
-    df_sonuc = coklu_piyasa_tara()
-
-  if not df_sonuc.empty:
-    st.success(
-        "Tespit Edilen Balina Sinyalleri"
-        f" ({pd.Timestamp.now().strftime('%H:%M:%S')}):"
-    )
-    st.dataframe(
-        df_sonuc,
-        column_config={
-            "Grafik": st.column_config.LinkColumn(
-                "MEXC Link", display_text="Grafiği Aç ↗"
-            )
-        },
-        use_container_width=True,
-    )
-  else:
-    st.info(
-        "Şu an taranan zaman dilimlerinde 1.8x ve üzeri balina hacim patlaması"
-        f" bulunamadı ({pd.Timestamp.now().strftime('%H:%M:%S')})."
-    )
+if __name__ == '__main__':
+  main()
