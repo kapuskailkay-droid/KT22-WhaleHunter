@@ -1,179 +1,227 @@
+import io
 import time
+import urllib.parse
 import ccxt
+import matplotlib
+import mplfinance as mpf
+import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-# --- SABİT BOT VE TELEGRAM AYARLARI ---
+matplotlib.use('Agg')
+
+# --- SABİT BOT VE TELEGRAM AYARLARI (GÖMÜLÜ) ---
 GOMULU_BOT_TOKEN = "7820599329:AAEAa13edhS9PLoG1t8R34PLO9xpKlaT_Lc"
 GOMULU_CHAT_ID = "-1004434260285"
+GOMULU_TOPIC_ID = "387"
 
 # --- SAYFA YAPILANDIRMASI ---
 st.set_page_config(
-    page_title="KENDİNE22TRADER - BTC/ETH & Haber Radarı",
+    page_title="KENDİNE22TRADER VIP MEXC Tarayıcı",
     layout="wide"
 )
 
-if "son_haber_idleri" not in st.session_state:
-    st.session_state.son_haber_idleri = set()
-
-if "son_fiyat_hafizasi" not in st.session_state:
-    st.session_state.son_fiyat_hafizasi = {}
+if "gonderilen_sinyaller" not in st.session_state:
+    st.session_state.gonderilen_sinyaller = set()
 
 # --- YAN PANEL: TELEGRAM AYARLARI ---
 st.sidebar.header("📱 Telegram Bildirim Ayarları")
-telegram_aktif = st.sidebar.checkbox("🚀 Telegram Bildirimleri Açık", value=True)
+telegram_aktif = st.sidebar.checkbox("🚀 Telegram'a Gönder", value=True)
 bot_token = st.sidebar.text_input("Telegram Bot Token", value=GOMULU_BOT_TOKEN, type="password")
 chat_id = st.sidebar.text_input("Telegram Chat ID", value=GOMULU_CHAT_ID)
-topic_id = st.sidebar.text_input("Haber Sekmesi Topic ID", value="", help="Haberler için açtığınız sekmenin ID'si (Genel grupsa boş bırakın)")
+topic_id = st.sidebar.text_input("Telegram Topic ID", value=GOMULU_TOPIC_ID)
 
 st.sidebar.markdown("---")
-st.sidebar.header("⚙️ Canlı Takip & Alarm Ayarları")
+st.sidebar.header("⚙️ Canlı Yayın & Otomatik Yenileme")
 
-oto_yenileme = st.sidebar.checkbox("🔄 Otomatik Canlı Takip Açık", value=True)
-yenileme_araligi = st.sidebar.selectbox("Kontrol Sıklığı", options=[15, 30, 60], index=0, format_func=lambda x: f"{x} Saniyede Bir")
+oto_yenileme = st.sidebar.checkbox("🔄 Otomatik Canlı Taramayı Aç", value=False)
+yenileme_araligi = st.sidebar.selectbox("Tarama Sıklığı", options=[15, 30, 60, 120, 300], index=2, format_func=lambda x: f"{x} Saniyede Bir")
 
 if oto_yenileme:
-    st_autorefresh(interval=yenileme_araligi * 1000, key="haber_ve_fiyat_takip")
+    st_autorefresh(interval=yenileme_araligi * 1000, key="canli_tarayici")
     st.sidebar.success(f"🟢 Canlı mod aktif: Her {yenileme_araligi} sn")
 
 st.sidebar.markdown("---")
-st.sidebar.header("🎯 Ani Değişim Alarm Eşikleri")
+st.sidebar.header("🎯 Tarama Parametreleri")
 
-min_artis_5m = st.sidebar.slider("5 Dakikalık Değişim Eşiği (%)", 1.0, 5.0, 1.5, 0.1)
-min_artis_15m = st.sidebar.slider("15 Dakikalık Değişim Eşiği (%)", 1.5, 8.0, 2.5, 0.1)
-min_artis_60m = st.sidebar.slider("60 Dakikalık Değişim Eşiği (%)", 2.5, 12.0, 3.5, 0.1)
+zaman_dilimi = st.sidebar.selectbox("Zaman Dilimi (Timeframe)", options=["15m", "1h", "4h", "1d"], index=1)
+coin_adedi = st.sidebar.select_slider("Taranacak En Yüksek Hacimli Coin Sayısı", options=[20, 50, 100, 150, 200], value=100)
+min_hacim_kati = st.sidebar.slider("Minimum Hacim Patlaması Katı", 1.2, 5.0, 1.8, 0.1)
 
-st.title("⚡ KENDİNE22TRADER - BTC/ETH Pump/Dump & FED Haber Radarı")
+st.title("🦅 KENDİNE22TRADER - MEXC VIP Long/Short Sinyal Radarı")
 
-# --- TELEGRAM MESAJ GÖNDERİCİ ---
-def telegram_mesaj_gonder(metin):
+# --- GRAFİK OLUŞTURMA ---
+def grafik_olustur(df_mum, sembol, zaman_dilimi):
+    df_grafik = df_mum.copy()
+    df_grafik['Zaman'] = pd.to_datetime(df_grafik['Zaman'], unit='ms')
+    df_grafik.set_index('Zaman', inplace=True)
+    df_grafik.rename(columns={
+        'Acilis': 'Open', 'Yuksek': 'High', 'Dusuk': 'Low', 'Kapanis': 'Close', 'Hacim': 'Volume'
+    }, inplace=True)
+    
+    mc = mpf.make_marketcolors(up='#00ff88', down='#ff3366', inherit=True)
+    s = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc, gridcolor='#2b2b2b')
+    
+    buf = io.BytesIO()
+    mpf.plot(
+        df_grafik.tail(40),
+        type='candle',
+        volume=True,
+        style=s,
+        title=f"{sembol} ({zaman_dilimi})",
+        savefig=dict(fname=buf, dpi=120, bbox_inches='tight')
+    )
+    buf.seek(0)
+    return buf
+
+# --- TELEGRAM MESAJ GÖNDERME (TOPIC 387 KİLİTLİ) ---
+def telegram_fotograf_gonder(foto_buf, caption_metni):
     if telegram_aktif and bot_token and chat_id:
-        url = f"https://api.telegram.org/bot{bot_token.strip()}/sendMessage"
-        params = {}
-        if topic_id and str(topic_id).strip() != "":
-            try:
-                params["message_thread_id"] = int(str(topic_id).strip())
-            except ValueError:
-                pass
+        url = f"https://api.telegram.org/bot{bot_token.strip()}/sendPhoto"
+        hedef_topic = str(topic_id).strip() if (topic_id and str(topic_id).strip() != "") else GOMULU_TOPIC_ID
+        
         data = {
             "chat_id": chat_id.strip(),
-            "text": metin,
+            "caption": caption_metni,
             "parse_mode": "HTML"
         }
+        if hedef_topic:
+            try:
+                data["message_thread_id"] = int(hedef_topic)
+            except ValueError:
+                pass
+                
+        files = {"photo": ("chart.png", foto_buf, "image/png")}
         try:
-            requests.post(url, params=params, data=data, timeout=8)
+            requests.post(url, data=data, files=files, timeout=14)
         except Exception:
             pass
 
-# --- KRİPTO & FED HABER AKIŞI MOTORU ---
-def son_dakika_haberleri_tara():
-    url = "https://cryptopanic.com/api/v1/posts/?auth_token=free&public=true"
-    haber_listesi = []
-    
-    try:
-        res = requests.get(url, timeout=5).json()
-        posts = res.get("results", [])
-        
-        for post in posts[:15]:
-            p_id = str(post.get("id"))
-            title = post.get("title", "")
-            kaynak = post.get("source", {}).get("title", "Kripto Ajansı")
-            url_link = post.get("url", "https://cryptopanic.com")
-            
-            # Haber Filtresi
-            onemli_kelimeler = ["FED", "POWELL", "RATE", "INFLATION", "CPI", "SEC", "ETF", "BREAKING", "URGENT", "BITCOIN", "ETHEREUM", "BINANCE", "WAR"]
-            onemli_mi = any(k in title.upper() for k in onemli_kelimeler)
-            
-            if p_id not in st.session_state.son_haber_idleri:
-                st.session_state.son_haber_idleri.add(p_id)
-                
-                # Telegram'a Haber Gönder
-                if telegram_aktif:
-                    etiket = "🚨 <b>SON DAKİKA GELİŞMESİ</b>" if onemli_mi else "📰 <b>KRİPTO HABERİ</b>"
-                    msg = (
-                        f"{etiket}\n\n"
-                        f"📌 <b>{title}</b>\n\n"
-                        f"🌐 <b>Kaynak:</b> {kaynak}\n"
-                        f"🔗 <a href='{url_link}'>Haberi Oku ↗</a>"
-                    )
-                    telegram_mesaj_gonder(msg)
-            
-            haber_listesi.append({"Başlık": title, "Kaynak": kaynak, "Link": url_link})
-    except Exception:
-        pass
-    
-    return pd.DataFrame(haber_listesi)
+# --- İNDİKATÖR HESAPLAMALARI ---
+def hesapla_rsi(seri, periyot=14):
+    fark = seri.diff()
+    kazanc = (fark.where(fark > 0, 0)).rolling(window=periyot).mean()
+    kayip = (-fark.where(fark < 0, 0)).rolling(window=periyot).mean()
+    rs = kazanc / kayip
+    return 100 - (100 / (1 + rs))
 
-# --- BTC & ETH ANİ HAREKET DEDEKTÖRÜ (MİKABOT FORMATI) ---
-def btc_eth_hareket_kontrol():
+def hesapla_atr(df, periyot=14):
+    h_l = df['Yuksek'] - df['Dusuk']
+    h_pc = (df['Yuksek'] - df['Kapanis'].shift(1)).abs()
+    l_pc = (df['Dusuk'] - df['Kapanis'].shift(1)).abs()
+    tr = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
+    atr_val = tr.rolling(window=periyot).mean().iloc[-1]
+    return atr_val if not np.isnan(atr_val) else df['Kapanis'].iloc[-1] * 0.02
+
+def hesapla_tp_sl(fiyat, atr, yon="LONG"):
+    if yon == "LONG":
+        sl = round(fiyat - (atr * 1.5), 6)
+        tp1 = round(fiyat + (atr * 1.5), 6)
+        tp2 = round(fiyat + (atr * 3.0), 6)
+    else:
+        sl = round(fiyat + (atr * 1.5), 6)
+        tp1 = round(fiyat - (atr * 1.5), 6)
+        tp2 = round(fiyat - (atr * 3.0), 6)
+    return tp1, tp2, sl
+
+# --- PİYASA TARAYICI ---
+def piyasa_tara():
     mexc = ccxt.mexc({'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
-    takip_pariteleri = ['BTC/USDT', 'ETH/USDT']
-    bildirimler = []
     
     try:
-        tickers = mexc.fetch_tickers(takip_pariteleri)
-    except Exception:
+        tickers = mexc.fetch_tickers()
+    except Exception as e:
+        st.error(f"MEXC Bağlantı Hatası: {e}")
         return pd.DataFrame()
         
-    for sembol in takip_pariteleri:
-        if sembol in tickers:
-            anlik_fiyat = tickers[sembol]['last']
-            parite_kodu = sembol.replace('/', '')
-            
-            for tf, limit_mum, esik, sure_adi in [('5m', 6, min_artis_5m, '5dk'), ('15m', 6, min_artis_15m, '15dk'), ('1h', 6, min_artis_60m, '60dk')]:
-                try:
-                    ohlcv = mexc.fetch_ohlcv(sembol, timeframe=tf, limit=limit_mum)
-                    if len(ohlcv) >= 2:
-                        baslangic_fiyat = ohlcv[0][1]
-                        yuzde_fark = ((anlik_fiyat - baslangic_fiyat) / baslangic_fiyat) * 100
-                        nakit_payi = round(38.0 + (abs(yuzde_fark) * 1.8) % 12, 2)
-                        
-                        if abs(yuzde_fark) >= esik:
-                            yon_ikon = "🔼" if yuzde_fark > 0 else "🔽"
-                            durum_ikon = "✅" if yuzde_fark > 0 else "⚠️"
-                            isaret = "+" if yuzde_fark > 0 else ""
-                            
-                            alarm_mesaji = (
-                                f"<b>{parite_kodu}</b> {yon_ikon} <b>%{isaret}{round(yuzde_fark, 2)} {sure_adi} içinde!</b> {anlik_fiyat}$ Ls:{durum_ikon}\n"
-                                f"NakitPayı:%{nakit_payi}"
-                            )
-                            
-                            alarm_anahtari = f"{parite_kodu}_{tf}_{round(yuzde_fark, 1)}"
-                            
-                            if alarm_anahtari not in st.session_state.son_fiyat_hafizasi.get(sembol, set()):
-                                if sembol not in st.session_state.son_fiyat_hafizasi:
-                                    st.session_state.son_fiyat_hafizasi[sembol] = set()
-                                
-                                st.session_state.son_fiyat_hafizasi[sembol].add(alarm_anahtari)
-                                telegram_mesaj_gonder(alarm_mesaji)
-                                
-                            bildirimler.append({
-                                "Parite": parite_kodu,
-                                "Değişim": f"{isaret}%{round(yuzde_fark, 2)}",
-                                "Süre": sure_adi,
-                                "Fiyat ($)": anlik_fiyat,
-                                "Nakit Payı": f"%{nakit_payi}"
-                            })
-                except Exception:
-                    pass
+    usdt_pariteler = [s for s in tickers.keys() if '/USDT' in s]
+    usdt_pariteler.sort(key=lambda x: tickers[x].get('quoteVolume', 0) or 0, reverse=True)
+    hedef_listesi = usdt_pariteler[:coin_adedi]
+    
+    sonuclar = []
+    
+    for sembol in hedef_listesi:
+        try:
+            mumlar = mexc.fetch_ohlcv(sembol, timeframe=zaman_dilimi, limit=40)
+            if len(mumlar) >= 20:
+                df = pd.DataFrame(mumlar, columns=['Zaman', 'Acilis', 'Yuksek', 'Dusuk', 'Kapanis', 'Hacim'])
                 
-    return pd.DataFrame(bildirimler)
+                gecmis_hacim = df['Hacim'].iloc[:-1].mean()
+                son_hacim = df['Hacim'].iloc[-1]
+                hacim_orani = (son_hacim / gecmis_hacim) if gecmis_hacim > 0 else 0
+                
+                df['RSI'] = hesapla_rsi(df['Kapanis'])
+                son_rsi = df['RSI'].iloc[-1]
+                son_kapanis = df['Kapanis'].iloc[-1]
+                son_acilis = df['Acilis'].iloc[-1]
+                
+                long_kosulu = (hacim_orani >= min_hacim_kati) and (son_kapanis > son_acilis) and (son_rsi <= 65)
+                short_kosulu = (hacim_orani >= min_hacim_kati) and (son_kapanis < son_acilis) and (son_rsi >= 35)
+                
+                if long_kosulu or short_kosulu:
+                    yon = "🟢 LONG" if long_kosulu else "🔴 SHORT"
+                    temiz_parite = sembol.split(':')[0]
+                    mexc_kod = temiz_parite.replace('/', '_')
+                    mexc_link = f"https://www.mexc.com/tr-TR/futures/{mexc_kod}"
+                    
+                    atr = hesapla_atr(df)
+                    yon_turu = "LONG" if long_kosulu else "SHORT"
+                    tp1, tp2, sl = hesapla_tp_sl(son_kapanis, atr, yon=yon_turu)
+                    
+                    sinyal_id = f"{temiz_parite}_{yon}_{zaman_dilimi}"
+                    
+                    if telegram_aktif and sinyal_id not in st.session_state.gonderilen_sinyaller:
+                        tg_caption = (
+                            f"⚡ <b>KENDİNE22TRADER VIP SİNYALİ</b>\n\n"
+                            f"📌 <b>Parite:</b> {temiz_parite}\n"
+                            f"🎯 <b>Yön:</b> {yon}\n"
+                            f"⏱ <b>Zaman:</b> {zaman_dilimi}\n"
+                            f"💰 <b>Giriş Fiyatı:</b> {son_kapanis} $\n"
+                            f"📊 <b>Hacim Katı:</b> {round(hacim_orani, 1)}x\n"
+                            f"📈 <b>RSI:</b> {round(son_rsi, 1)}\n\n"
+                            f"🎯 <b>HEDEF 1 (TP1):</b> {tp1} $\n"
+                            f"🎯 <b>HEDEF 2 (TP2):</b> {tp2} $\n"
+                            f"🛑 <b>STOP-LOSS:</b> {sl} $\n\n"
+                            f"🔗 <a href='{mexc_link}'>MEXC Vadeli Grafiği Aç ↗</a>"
+                        )
+                        try:
+                            foto_buffer = grafik_olustur(df, temiz_parite, zaman_dilimi)
+                            telegram_fotograf_gonder(foto_buffer, tg_caption)
+                        except Exception:
+                            pass
+                            
+                        st.session_state.gonderilen_sinyaller.add(sinyal_id)
+                    
+                    sonuclar.append({
+                        "Yön": yon,
+                        "Sembol": temiz_parite,
+                        "Fiyat ($)": son_kapanis,
+                        "Hacim Katı": f"{round(hacim_orani, 1)}x",
+                        "RSI": round(son_rsi, 1),
+                        "TP1 ($)": tp1,
+                        "SL ($)": sl,
+                        "Grafik": mexc_link
+                    })
+        except Exception:
+            pass
+            
+    return pd.DataFrame(sonuclar)
 
-# --- ÇALIŞTIRMA VE EKRAN ---
-col_sol, col_sag = st.columns(2)
+# --- ÇALIŞTIRMA VE GÖRÜNTÜLEME ---
+manuel_tara = st.button("🔍 Piyasayı Manuel Tara", type="primary", use_container_width=True)
 
-with col_sol:
-    st.subheader("📈 BTC & ETH Ani Hareket Radarı")
-    df_fiyat = btc_eth_hareket_kontrol()
-    if not df_fiyat.empty:
-        st.dataframe(df_fiyat, use_container_width=True)
+if oto_yenileme or manuel_tara:
+    with st.spinner("Piyasa taranıyor ve analiz ediliyor..."):
+        df_sonuc = piyasa_tara()
+        
+    if not df_sonuc.empty:
+        st.success(f"Tespit Edilen Sinyaller ({pd.Timestamp.now().strftime('%H:%M:%S')}):")
+        st.dataframe(
+            df_sonuc,
+            column_config={"Grafik": st.column_config.LinkColumn("MEXC Link", display_text="Grafiği Aç ↗")},
+            use_container_width=True
+        )
     else:
-        st.info("BTC ve ETH eşik değerlerin altında stabil seyrediyor.")
-
-with col_sag:
-    st.subheader("📰 Son Dakika Kripto & FED Haberleri")
-    df_haber = son_dakika_haberleri_tara()
-    if not df_haber.empty:
-        st.dataframe(df_haber, use_container_width=True)
+        st.info(f"Şu an aranan kriterlerde sinyal bulunamadı ({pd.Timestamp.now().strftime('%H:%M:%S')}).")
