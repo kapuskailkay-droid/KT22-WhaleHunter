@@ -12,23 +12,23 @@ import requests
 
 matplotlib.use('Agg')
 
-# --- SABİT BOT VE TELEGRAM AYARLARI ---
+# --- BOT & TELEGRAM AYARLARI ---
 BOT_TOKEN = "7820599329:AAEAa13edhS9PLoG1t8R34PLO9xpKlaT_Lc"
 CHAT_ID = "-1004434260285"
 TOPIC_ID = 387
-COIN_ADEDI = 200
+COIN_LIMIT = 80  # En hacimli 80 coin (Rate-limit korumalı)
 
 hafiza = set()
 
 
-# Render Port Dinleyicisi (7/24 Kesintisiz Çalışma)
+# Render Port Dinleyicisi (7/24 Açık Kalma)
 class HealthCheckHandler(BaseHTTPRequestHandler):
 
   def do_GET(self):
     self.send_response(200)
     self.send_header('Content-type', 'text/plain; charset=utf-8')
     self.end_headers()
-    self.wfile.write(b'KENDINE22TRADER WhaleHunter 200 Coin Aktif!')
+    self.wfile.write(b'KENDINE22TRADER WhaleHunter 7/24 Aktif!')
 
   def log_message(self, format, *args):
     return
@@ -50,7 +50,8 @@ def telegram_foto_gonder(foto_buf, caption):
   }
   files = {'photo': ('chart.png', foto_buf, 'image/png')}
   try:
-    requests.post(url, data=data, files=files, timeout=15)
+    res = requests.post(url, data=data, files=files, timeout=15)
+    print(f'Telegram Gönderim Sonucu: {res.status_code}')
   except Exception as e:
     print(f'Telegram Fotoğraf Hatası: {e}')
 
@@ -69,7 +70,7 @@ def grafik_ciz(df_mum, sembol, tf_etiket, tp1, tp2, sl):
       },
       inplace=True,
   )
-  df_plot = df_grafik.tail(40)
+  df_plot = df_grafik.tail(35)
 
   mc = mpf.make_marketcolors(
       up='#00FF88', down='#FF3366', inherit=True, volume='in'
@@ -97,7 +98,7 @@ def grafik_ciz(df_mum, sembol, tf_etiket, tp1, tp2, sl):
       style=s,
       hlines=hlines_dict,
       returnfig=True,
-      figsize=(9, 5.5),
+      figsize=(9, 5.2),
       savefig=dict(dpi=130, bbox_inches='tight'),
   )
   ax_main = axes[0]
@@ -109,35 +110,15 @@ def grafik_ciz(df_mum, sembol, tf_etiket, tp1, tp2, sl):
       pad=10,
   )
 
-  son_x = len(df_plot) - 1
-  ax_main.text(
-      son_x,
-      tp1,
-      f' TP1: {tp1}$',
-      color='#00FF88',
-      fontsize=8,
-      fontweight='bold',
-      verticalalignment='center',
-  )
-  ax_main.text(
-      son_x,
-      sl,
-      f' SL: {sl}$',
-      color='#FF3366',
-      fontsize=8,
-      fontweight='bold',
-      verticalalignment='center',
-  )
-
   fig.savefig(buf, format='png', bbox_inches='tight', facecolor='#0E1117')
   buf.seek(0)
   plt.close('all')
   return buf
 
 
-# --- FAKE SİNYAL ENGELLEYİCİ VE BALİNA FİLTRESİ ---
-def balina_ve_onay_kontrol(df):
-  if len(df) < 25:
+# --- GELİŞMİŞ VE ONAYLI BALİNA MOTORU ---
+def balina_kontrol(df):
+  if len(df) < 20:
     return None, 0, 0
 
   closes = df['Kapanis'].values
@@ -146,26 +127,23 @@ def balina_ve_onay_kontrol(df):
   lows = df['Dusuk'].values
   vols = df['Hacim'].values
 
-  # 1. Hacim Katı Kontrolü (Son 20 mum ortalaması)
-  ort_hacim = np.mean(vols[-21:-1])
+  # 1. Hacim Katı (Son 15 mumluk hacim ortalamasına kıyasla)
+  ort_hacim = np.mean(vols[-16:-1])
   son_hacim = vols[-1]
   if ort_hacim <= 0:
     return None, 0, 0
   hacim_kati = son_hacim / ort_hacim
 
-  # En az 1.6x hacim patlaması aranır
-  if hacim_kati < 1.6:
+  # 1.35x ve üzeri hacim patlaması
+  if hacim_kati < 1.35:
     return None, 0, 0
 
-  # 2. Gövde Gücü (Fake Fitil / Likidite İğnesi Eleme)
-  toplam_boyut = highs[-1] - lows[-1]
-  if toplam_boyut <= 0:
+  # 2. Gövde Gücü Kontrolü (Sahte İğne/Fitil Önleme)
+  toplam_mum_boyu = highs[-1] - lows[-1]
+  if toplam_mum_boyu <= 0:
     return None, 0, 0
-  govde_boyutu = abs(closes[-1] - opens[-1])
-  govde_orani = govde_boyutu / toplam_boyut
-
-  # Mumun en az %45'i gövde olmalı (Doji ve kararsız mumları eler)
-  if govde_orani < 0.45:
+  govde = abs(closes[-1] - opens[-1])
+  if (govde / toplam_mum_boyu) < 0.35:  # Doji / Kararsız mumları eler
     return None, 0, 0
 
   # 3. RSI Hesaplama (14 Periyot)
@@ -175,13 +153,10 @@ def balina_ve_onay_kontrol(df):
   rs = gain / (loss + 1e-9)
   rsi = float((100 - (100 / (1 + rs))).iloc[-1])
 
-  # 4. Yön ve Trend Doğrulaması
-  # LONG Şartı: Yeşil dolgun mum + Hacim + RSI aşırı şişmemiş (35 - 72 bandı)
-  if (closes[-1] > opens[-1]) and (35 <= rsi <= 72):
+  # 4. Yön Tespiti
+  if (closes[-1] > opens[-1]) and (30 <= rsi <= 75):
     return 'LONG', round(hacim_kati, 2), round(rsi, 1)
-
-  # SHORT Şartı: Kırmızı dolgun mum + Hacim + RSI aşırı dipte değil (28 - 65 bandı)
-  elif (closes[-1] < opens[-1]) and (28 <= rsi <= 65):
+  elif (closes[-1] < opens[-1]) and (25 <= rsi <= 70):
     return 'SHORT', round(hacim_kati, 2), round(rsi, 1)
 
   return None, 0, 0
@@ -189,7 +164,7 @@ def balina_ve_onay_kontrol(df):
 
 def main():
   threading.Thread(target=start_http_server, daemon=True).start()
-  print('🚀 KENDİNE22TRADER WhaleHunter (200 Coin + Anti-Fake) Başlatıldı...')
+  print('🐋 KENDİNE22TRADER WhaleHunter Hızlı Tarama Başlatıldı...')
 
   headers = {
       'User-Agent': (
@@ -203,32 +178,37 @@ def main():
       ('Min15', '15m', '15 Dakika'),
       ('Min30', '30m', '30 Dakika'),
       ('Min60', '1h', '1 Saat'),
-      ('Hour4', '4h', '4 Saat'),
   ]
 
   while True:
     try:
-      # MEXC Vadeli 200 Parite Çekimi
       url_tickers = 'https://contract.mexc.com/api/v1/contract/ticker'
       res = requests.get(url_tickers, headers=headers, timeout=8).json()
 
       if res.get('success', False):
-        data_tickers = res.get('data', [])
-        usdt_pariteler = [
-            d for d in data_tickers if d.get('symbol', '').endswith('_USDT')
+        tickers = [
+            d
+            for d in res.get('data', [])
+            if d.get('symbol', '').endswith('_USDT')
         ]
-        usdt_pariteler.sort(
+        tickers.sort(
             key=lambda x: float(x.get('amount24', 0) or 0), reverse=True
         )
-        hedef_listesi = usdt_pariteler[:COIN_ADEDI]
+        secilen_pariteler = tickers[:COIN_LIMIT]
 
-        for coin in hedef_listesi:
+        print(
+            f'🔍 [{time.strftime("%H:%M:%S")}] {len(secilen_pariteler)} Coin'
+            ' Taranıyor...'
+        )
+
+        for coin in secilen_pariteler:
           sembol_raw = coin['symbol']
           temiz_parite = sembol_raw.replace('_', '/')
           mexc_link = f'https://www.mexc.com/tr-TR/futures/{sembol_raw}'
 
           for api_tf, tf_kod, tf_ad in zaman_dilimleri:
             try:
+              time.sleep(0.05)  # MEXC Rate-limit engelleyici mikro bekleme
               url_kline = f'https://contract.mexc.com/api/v1/contract/kline/{sembol_raw}?interval={api_tf}'
               kline_res = requests.get(
                   url_kline, headers=headers, timeout=3
@@ -243,17 +223,17 @@ def main():
                 lows = k_data.get('low', [])
                 vols = k_data.get('vol', [])
 
-                if len(closes) >= 30:
+                if len(closes) >= 20:
                   df = pd.DataFrame({
-                      'Zaman': [t * 1000 for t in times[-45:]],
-                      'Acilis': [float(x) for x in opens[-45:]],
-                      'Yuksek': [float(x) for x in highs[-45:]],
-                      'Dusuk': [float(x) for x in lows[-45:]],
-                      'Kapanis': [float(x) for x in closes[-45:]],
-                      'Hacim': [float(x) for x in vols[-45:]],
+                      'Zaman': [t * 1000 for t in times[-40:]],
+                      'Acilis': [float(x) for x in opens[-40:]],
+                      'Yuksek': [float(x) for x in highs[-40:]],
+                      'Dusuk': [float(x) for x in lows[-40:]],
+                      'Kapanis': [float(x) for x in closes[-40:]],
+                      'Hacim': [float(x) for x in vols[-40:]],
                   })
 
-                  yon, hacim_kati, rsi_degeri = balina_ve_onay_kontrol(df)
+                  yon, hacim_kati, rsi_val = balina_kontrol(df)
 
                   if yon:
                     son_kapanis = df['Kapanis'].iloc[-1]
@@ -268,27 +248,27 @@ def main():
                           .iloc[-1]
                       )
                       if np.isnan(atr):
-                        atr = son_kapanis * 0.018
+                        atr = son_kapanis * 0.015
 
                       if yon == 'LONG':
-                        sl = round(son_kapanis - (atr * 1.5), 6)
+                        sl = round(son_kapanis - (atr * 1.4), 6)
                         tp1 = round(son_kapanis + (atr * 1.8), 6)
-                        tp2 = round(son_kapanis + (atr * 3.5), 6)
-                        yon_emoji = '🟢 LONG'
+                        tp2 = round(son_kapanis + (atr * 3.2), 6)
+                        yon_str = '🟢 LONG'
                       else:
-                        sl = round(son_kapanis + (atr * 1.5), 6)
+                        sl = round(son_kapanis + (atr * 1.4), 6)
                         tp1 = round(son_kapanis - (atr * 1.8), 6)
-                        tp2 = round(son_kapanis - (atr * 3.5), 6)
-                        yon_emoji = '🔴 SHORT'
+                        tp2 = round(son_kapanis - (atr * 3.2), 6)
+                        yon_str = '🔴 SHORT'
 
                       caption = (
                           f'🐋 <b>KT22 WHALEHUNTER SİNYALİ (ONAYLI)</b>\n\n'
                           f'📌 <b>Parite:</b> {temiz_parite}\n'
                           f'⏱ <b>Zaman Dilimi:</b> {tf_ad} ({tf_kod})\n'
-                          f'🎯 <b>Yön:</b> {yon_emoji}\n'
+                          f'🎯 <b>Yön:</b> {yon_str}\n'
                           f'💰 <b>Giriş Fiyatı:</b> {son_kapanis} $\n'
-                          f'📊 <b>Balina Hacim Patlaması:</b> {hacim_kati}x\n'
-                          f'📈 <b>RSI:</b> {rsi_degeri}\n\n'
+                          f'📊 <b>Hacim Patlaması:</b> {hacim_kati}x\n'
+                          f'📈 <b>RSI:</b> {rsi_val}\n\n'
                           f'🎯 <b>HEDEF 1 (TP1):</b> {tp1} $\n'
                           f'🎯 <b>HEDEF 2 (TP2):</b> {tp2} $\n'
                           f'🛑 <b>STOP-LOSS:</b> {sl} $\n\n'
@@ -301,14 +281,14 @@ def main():
                       )
                       telegram_foto_gonder(foto, caption)
                       hafiza.add(sinyal_id)
-                      print(f'✅ Onaylı Balina Sinyali: {sinyal_id}')
-                      time.sleep(1.5)
+                      print(f'✅ Balina Sinyali Gönderildi: {sinyal_id}')
+                      time.sleep(1)
             except Exception:
               pass
     except Exception as e:
-      print(f'Tarama Hatası: {e}')
+      print(f'Ana Döngü Hatası: {e}')
 
-    time.sleep(20)
+    time.sleep(15)
 
 
 if __name__ == '__main__':
